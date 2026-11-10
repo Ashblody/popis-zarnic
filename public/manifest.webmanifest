@@ -1,0 +1,25 @@
+{
+  "name": "Popis žarnic",
+  "short_name": "Popis žarnic",
+  "description": "Popis skladišča žarnic: skeniraj škatlo, vpiši količino, izvozi v Excel.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#1a202c",
+  "theme_color": "#1a202c",
+  "lang": "sl",
+  "icons": [
+    {
+      "src": "./icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
