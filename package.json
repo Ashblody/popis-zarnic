@@ -1,9 +1,9 @@
 {
   "name": "popis-zarnic",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "type": "module",
-  "description": "Popis skladi\u0161\u010da \u017earnic \u2014 PWA za telefon (EAN/QR, koli\u010dina, OCR napisa, izvoz Excel)",
+  "description": "Popis skladišča žarnic — PWA (EAN/QR, OCR, Excel, skupna zaloga)",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

@@ -19,7 +19,10 @@ export type Article = {
   /** Družina iz popisa (npr. NL-T5, RX-L, RL-PAR). */
   skupina?: string
   updatedAt: string
-  /** Id vrstice v Google Sheetu, ko pride skupna zaloga. */
+  updatedBy?: string
+  /** Skrit ob sinhroniziranem brisanju; lokalno se ne kaže. */
+  deleted?: boolean
+  /** Zastarelo; id artikla je zdaj isti kot v Sheetu. */
   remoteId?: string
 }
 

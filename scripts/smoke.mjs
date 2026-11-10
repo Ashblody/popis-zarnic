@@ -78,7 +78,8 @@ await page.goto(origin, { waitUntil: 'networkidle0' })
 const title = await page.title()
 if (!title.includes('Popis žarnic')) throw new Error(`Unexpected title: ${title}`)
 const homeText = await page.$eval('#app', (el) => el.innerText)
-if (!homeText.includes('v1.1.0')) throw new Error(`Manjka različica v1.1.0: ${homeText.slice(0, 200)}`)
+if (!homeText.includes('v1.2.0')) throw new Error(`Manjka različica v1.2.0: ${homeText.slice(0, 200)}`)
+if (!(await page.$('#btn-sync'))) throw new Error('Manjka gumb Skupna zaloga')
 
 await page.click('#btn-new')
 await page.waitForSelector('#edit-form')
@@ -117,15 +118,49 @@ while (Date.now() < deadline) {
 }
 if (!downloaded) throw new Error('xlsx se ni prenesel')
 
-await page.click('#btn-scan')
-await page.waitForSelector('#scan-overlay, #btn-cancel-scan', { timeout: 8000 })
-const crashed = errors.length > 0
-const scanVisible = await page.$('#btn-cancel-scan')
-if (!scanVisible) throw new Error('Gumb za preklic skeniranja se ni prikazal')
-// Fake camera may or may not attach; just ensure no pageerror and overlay is up.
-if (crashed) throw new Error(`Skeniranje je podrlo stran: ${errors.join('; ')}`)
-await page.click('#btn-cancel-scan')
-await page.waitForFunction(() => !document.querySelector('#btn-cancel-scan'))
+await page.$eval('#btn-sync', (el) => {
+  if (el instanceof HTMLElement) {
+    el.scrollIntoView({ block: 'center' })
+    el.click()
+  }
+})
+await page.waitForSelector('#sync-overlay #btn-sync-close')
+const syncTitle = await page.$eval('#sync-overlay h2', (el) => el.textContent || '')
+if (!syncTitle.includes('Skupna zaloga')) throw new Error(`Nastavitve skupne zaloge: ${syncTitle}`)
+await page.$eval('#sync-overlay #btn-sync-close', (el) => {
+  if (el instanceof HTMLElement) el.click()
+})
+await page.waitForFunction(() => !document.querySelector('#sync-overlay'))
+
+await page.$eval('#btn-scan', (el) => {
+  if (el instanceof HTMLElement) {
+    el.scrollIntoView({ block: 'center' })
+    el.click()
+  }
+})
+await page.waitForFunction(
+  () =>
+    document.querySelector('#scan-overlay') ||
+    document.querySelector('#edit-form') ||
+    document.querySelector('#btn-save-qty'),
+  { timeout: 8000 },
+)
+if (errors.length) throw new Error(`Skeniranje je podrlo stran: ${errors.join('; ')}`)
+if (await page.$('#btn-cancel-scan')) {
+  await page.$eval('#btn-cancel-scan', (el) => {
+    if (el instanceof HTMLElement) el.click()
+  })
+  await page.waitForFunction(() => !document.querySelector('#scan-overlay'))
+} else if (await page.$('#btn-cancel-edit')) {
+  await page.$eval('#btn-cancel-edit', (el) => {
+    if (el instanceof HTMLElement) el.click()
+  })
+} else if (await page.$('#btn-cancel-qty')) {
+  await page.$eval('#btn-cancel-qty', (el) => {
+    if (el instanceof HTMLElement) el.click()
+  })
+}
+await page.waitForFunction(() => !document.querySelector('#scan-overlay'))
 
 await page.screenshot({ path: path.join(outDir, 'home-390.png'), fullPage: true })
 

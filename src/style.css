@@ -317,3 +317,31 @@ textarea { min-height: 72px; resize: vertical; }
   color: #3b5bdb;
   flex-shrink: 0;
 }
+
+
+.sync-status {
+  color: var(--ok);
+  font-size: 0.85rem;
+  margin: 4px 0 0;
+  font-weight: 650;
+}
+
+.sync-status:empty,
+.sync-status[hidden] {
+  display: none;
+}
+
+label.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-weight: 650;
+  font-size: 0.95rem;
+}
+
+textarea.setup-link {
+  min-height: 88px;
+  font-size: 0.85rem;
+  font-weight: 400;
+  resize: vertical;
+}

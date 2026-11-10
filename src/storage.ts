@@ -24,7 +24,9 @@ export function isArticle(raw: unknown): raw is Article {
     Number.isFinite(a.kolicina) &&
     typeof a.opomba === 'string' &&
     typeof a.updatedAt === 'string' &&
-    (a.skupina === undefined || typeof a.skupina === 'string')
+    (a.skupina === undefined || typeof a.skupina === 'string') &&
+    (a.updatedBy === undefined || typeof a.updatedBy === 'string') &&
+    (a.deleted === undefined || typeof a.deleted === 'boolean')
   )
 }
 
@@ -71,7 +73,7 @@ export function normalizeEan(ean: string): string {
 export function findByEan(data: InventoryData, ean: string): Article | undefined {
   const needle = normalizeEan(ean)
   if (!needle) return undefined
-  return data.articles.find((a) => normalizeEan(a.ean) === needle)
+  return data.articles.find((a) => !a.deleted && normalizeEan(a.ean) === needle)
 }
 
 export function findById(data: InventoryData, id: string): Article | undefined {
@@ -81,7 +83,7 @@ export function findById(data: InventoryData, id: string): Article | undefined {
 export function findBySifra(data: InventoryData, sifra: string): Article | undefined {
   const needle = sifra.trim()
   if (!needle) return undefined
-  return data.articles.find((a) => a.sifra.trim() === needle)
+  return data.articles.find((a) => !a.deleted && a.sifra.trim() === needle)
 }
 
 export function upsertArticle(data: InventoryData, article: Article): InventoryData {

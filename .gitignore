@@ -16,3 +16,6 @@ smoke-output
 
 # Tesseract assets (copied by scripts/copy-tess.mjs at build)
 public/tess
+
+# Lokalni PIN za skupno zalogo (nikoli v git)
+SKUPNA-ZALOGA-PIN.txt

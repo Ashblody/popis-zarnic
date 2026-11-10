@@ -15,10 +15,11 @@ Preprosta aplikacija za telefon, s katero Hebo in žena popisujeta zalogo žarni
 7. Na praznem telefonu pritisni **Naloži seznam žarnic (81)** za inventuro iz 9. 11. 2026 (2643 kos). Isti seznam lahko uvoziš tudi z **Uvozi Excel** (xlsx, xls, xlt, ods ali csv). Če se isto ime pojavi dvakrat, aplikacija obeh ne združi.
 8. Če skeniraš kodo artikla, ki ga že imaš brez EAN, izberi **Poveži z obstoječim artiklom**.
 9. Na koncu pritisni **Izvozi v Excel**. Datoteka ima list **Popis** (4 stolpci ime/količina, kot doslej) in list **Seznam** s šifro in EAN.
+10. Za skupno zalogo na obeh telefonih odpri **Skupna zaloga**, prilepi naslov spletne aplikacije in PIN (ali povezavo za nastavitev). Stanje se uskladi ob odprtju in približno vsakih 30 sekund; količine se prištevajo, da lahko oba štejeta hkrati. Če nastavitve ni, ostane seznam samo na tem telefonu. Ko ni interneta, vidiš **Brez povezave** — spremembe se pošljejo, ko je spet povezava.
 
 **Nov popis** vse količine postavi na 0, artikli (imena, šifre, kode) pa ostanejo.
 
-Pomembno: podatki so trenutno shranjeni na vsakem telefonu posebej. Skupna zaloga za oba pride v naslednji različici.
+Namestitev skupne zaloge (Apps Script) je opisana v `apps-script/README.md`. PIN shrani samo v Script Properties, ne v to repozitorij.
 
 ## Razvoj
 
@@ -29,4 +30,4 @@ npm run build
 npm run smoke
 ```
 
-Aplikacija je namenoma lokalna (brez računa). Zna brati EAN/QR/Data Matrix, predlagati šifro/ime z OCR in uvoziti obstoječi Excel. Kasneje: skupna zaloga prek Google Sheet.
+Aplikacija zna brati EAN/QR/Data Matrix, predlagati šifro/ime z OCR, uvoziti obstoječi Excel in usklajevati skupno zalogo prek Google Sheet + Apps Script.

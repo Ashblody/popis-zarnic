@@ -23,8 +23,30 @@ import {
   upsertArticle,
 } from './storage.ts'
 import type { Article, InventoryData } from './types.ts'
+import {
+  applyPull,
+  buildSetupLink,
+  enqueueOp,
+  isConfigured,
+  matchLocalToRemote,
+  opFromUpsert,
+  opsAfterRemap,
+  parseSetupLink,
+  seedPendingFromLocal,
+  syncStatusText,
+  type SyncConfig,
+} from './sync.ts'
+import {
+  clearSyncConfig,
+  ensureSyncConfig,
+  loadSyncConfig,
+  saveSyncConfig,
+  syncPing,
+  syncPull,
+  syncPush,
+} from './syncClient.ts'
 
-const APP_VERSION = '1.1.0'
+const APP_VERSION = '1.2.0'
 
 type OcrStatus = 'idle' | 'running' | 'done' | 'error'
 
@@ -44,6 +66,7 @@ type Screen =
     }
   | { kind: 'confirm-reset' }
   | { kind: 'import-preview'; result: ImportResult }
+  | { kind: 'sync-settings'; message?: string }
 
 let data: InventoryData = loadData()
 let query = ''
@@ -52,10 +75,137 @@ let banner = ''
 let scanHandle: ScanHandle | undefined
 let linkQuery = ''
 let linkQueryLocked = false
+let syncConfig: SyncConfig | undefined = loadSyncConfig()
+let syncing = false
+let syncError = ''
+let syncTimer: ReturnType<typeof setInterval> | undefined
 const app = document.querySelector('#app')
 
 function persist(): void {
   saveData(data)
+}
+
+function deviceLabel(): string {
+  return (syncConfig?.deviceName || syncConfig?.deviceId || 'telefon').trim()
+}
+
+function currentSyncStatus(): string {
+  return syncStatusText({
+    configured: isConfigured(syncConfig),
+    online: typeof navigator === 'undefined' ? true : navigator.onLine,
+    syncing,
+    error: syncError,
+    lastSyncAt: syncConfig?.lastSyncAt,
+  })
+}
+
+function updateSyncStatus(): void {
+  const el = document.getElementById('sync-status')
+  if (!el) return
+  const text = currentSyncStatus()
+  el.textContent = text
+  el.hidden = !text
+}
+
+function queueMutation(prev: Article | undefined, next: Article, flush = true): void {
+  if (!isConfigured(syncConfig) || !syncConfig) return
+  const article = next.updatedBy ? next : { ...next, updatedBy: deviceLabel() }
+  syncConfig = {
+    ...syncConfig,
+    pending: enqueueOp(syncConfig.pending, opFromUpsert(prev, article, article.updatedBy || deviceLabel())),
+  }
+  saveSyncConfig(syncConfig)
+  if (flush) void flushSync()
+}
+
+function consumeSetupHash(): boolean {
+  if (typeof location === 'undefined') return false
+  const parsed = parseSetupLink(location.hash) || parseSetupLink(location.href)
+  if (!parsed) return false
+  history.replaceState(null, '', `${location.pathname}${location.search}`)
+  syncConfig = ensureSyncConfig({
+    url: parsed.url,
+    pin: parsed.pin,
+    deviceName: syncConfig?.deviceName,
+  })
+  return true
+}
+
+async function flushSync(): Promise<void> {
+  if (!isConfigured(syncConfig) || !syncConfig || syncing) {
+    updateSyncStatus()
+    return
+  }
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    syncError = ''
+    updateSyncStatus()
+    return
+  }
+  syncing = true
+  updateSyncStatus()
+  const applyToUi = screen.kind === 'home' || screen.kind === 'sync-settings'
+  const articlesBefore = applyToUi && screen.kind === 'home' ? JSON.stringify(data.articles) : ''
+  let shouldFlushAgain = false
+  try {
+    const cfg = syncConfig
+    const pulled = await syncPull(cfg)
+    if (!pulled.ok || !pulled.articles) {
+      syncError = pulled.error || 'pull'
+      return
+    }
+    const remotes = pulled.articles
+    const matched = matchLocalToRemote(data.articles, remotes)
+    if (matched.remaps.length) {
+      data = { ...data, articles: matched.local }
+    }
+    const latest = syncConfig
+    let pending = opsAfterRemap(latest.pending, matched.remaps)
+    pending = seedPendingFromLocal(data.articles, remotes, pending, deviceLabel())
+    syncConfig = { ...latest, pending }
+    saveSyncConfig(syncConfig)
+    if (applyToUi) {
+      data = { ...data, articles: applyPull(data.articles, remotes, pending) }
+      persist()
+    }
+    if (pending.length) {
+      if (!applyToUi) return
+      const pushed = await syncPush({ ...syncConfig, pending }, pending)
+      if (!pushed.ok || !pushed.articles) {
+        syncError = pushed.error || 'push'
+        return
+      }
+      const arrived = opsAfterRemap(syncConfig.pending, matched.remaps)
+      // keep ops that were enqueued during the push
+      const leftover = arrived.filter((op) => !pending.some((p) => p.id === op.id && p.updatedAt === op.updatedAt && p.qtyDelta === op.qtyDelta))
+      data = { ...data, articles: applyPull(data.articles, pushed.articles, leftover) }
+      persist()
+      pending = leftover
+    }
+    const now = nowIso()
+    syncConfig = { ...syncConfig, pending, lastSyncAt: now }
+    saveSyncConfig(syncConfig)
+    syncError = ''
+    if (data.sync?.lastSyncAt !== now) {
+      data = { ...data, sync: { ...(data.sync ?? {}), lastSyncAt: now } }
+      persist()
+    }
+    shouldFlushAgain = pending.length > 0
+  } catch {
+    syncError = 'network'
+  } finally {
+    syncing = false
+    updateSyncStatus()
+    if (applyToUi && screen.kind === 'home' && JSON.stringify(data.articles) !== articlesBefore) render()
+    if (shouldFlushAgain) void flushSync()
+  }
+}
+
+function startSyncLoop(): void {
+  if (syncTimer) clearInterval(syncTimer)
+  syncTimer = setInterval(() => {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+    void flushSync()
+  }, 30000)
 }
 
 function nowIso(): string {
@@ -116,13 +266,23 @@ function render(): void {
     bindImportPreview()
     return
   }
+  if (screen.kind === 'sync-settings') {
+    app.innerHTML = renderHome() + renderSyncSettings(screen.message)
+    bindHome()
+    bindSyncSettings()
+    return
+  }
   app.innerHTML = renderHome() + renderResetConfirm()
   bindHome()
   bindReset()
 }
 
+function liveArticles(): Article[] {
+  return data.articles.filter((a) => !a.deleted)
+}
+
 function visibleArticles(): Article[] {
-  return data.articles.filter((a) => articleMatches(query, a))
+  return liveArticles().filter((a) => articleMatches(query, a))
 }
 
 
@@ -148,7 +308,7 @@ function renderHome(): string {
         .map((a) => renderArticleCard(a))
         .join('')
     : `<p class="empty">${
-        data.articles.length === 0
+        liveArticles().length === 0
           ? 'Ni artiklov. Naloži seznam žarnic, skeniraj škatlo ali dodaj artikel ročno.'
           : 'Nisem našel artikla s tem iskanjem.'
       }</p>`
@@ -159,7 +319,8 @@ function renderHome(): string {
       <img src="${import.meta.env.BASE_URL}icon-192.png" alt="" width="48" height="48" />
       <div>
         <h1>Popis žarnic</h1>
-        <p class="sub">${data.articles.length} artiklov na tem telefonu · v${APP_VERSION}</p>
+        <p class="sub">${liveArticles().length} artiklov na tem telefonu · v${APP_VERSION}</p>
+        <p class="sync-status" id="sync-status"${currentSyncStatus() ? '' : ' hidden'}>${escapeHtml(currentSyncStatus())}</p>
       </div>
     </header>
     ${notice}
@@ -168,7 +329,7 @@ function renderHome(): string {
       <button type="button" class="btn btn-primary" id="btn-scan">Skeniraj</button>
       <button type="button" class="btn" id="btn-new">Nov artikel</button>
       ${
-        data.articles.length === 0
+        liveArticles().length === 0
           ? `<button type="button" class="btn btn-primary" id="btn-starter">Naloži seznam žarnic (81)</button>`
           : ''
       }
@@ -178,6 +339,7 @@ function renderHome(): string {
       </div>
       <input id="file-import" type="file" accept=".xlsx,.xls,.xlt,.ods,.csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.oasis.opendocument.spreadsheet,text/csv" hidden />
       <div class="row-actions">
+        <button type="button" class="btn" id="btn-sync">Skupna zaloga</button>
         <button type="button" class="btn btn-danger" id="btn-reset">Nov popis</button>
       </div>
     </div>
@@ -348,7 +510,7 @@ function bindHome(): void {
       ? visibleArticles()
           .map((a) => renderArticleCard(a))
           .join('')
-      : `<p class="empty">${data.articles.length === 0 ? 'Ni artiklov. Naloži seznam žarnic, skeniraj škatlo ali dodaj artikel ročno.' : 'Nisem našel artikla s tem iskanjem.'}</p>`
+      : `<p class="empty">${liveArticles().length === 0 ? 'Ni artiklov. Naloži seznam žarnic, skeniraj škatlo ali dodaj artikel ročno.' : 'Nisem našel artikla s tem iskanjem.'}</p>`
     bindCards()
   })
   document.getElementById('btn-scan')?.addEventListener('click', () => {
@@ -379,7 +541,131 @@ function bindHome(): void {
     screen = { kind: 'confirm-reset' }
     render()
   })
+  document.getElementById('btn-sync')?.addEventListener('click', () => {
+    screen = { kind: 'sync-settings' }
+    render()
+  })
   bindCards()
+}
+
+function renderSyncSettings(message?: string): string {
+  const url = syncConfig?.url ?? ''
+  const pin = syncConfig?.pin ?? ''
+  const name = syncConfig?.deviceName ?? ''
+  const configured = isConfigured(syncConfig)
+  const base = `${location.origin}${import.meta.env.BASE_URL}`
+  const setup = configured && syncConfig ? buildSetupLink(base, syncConfig.url, syncConfig.pin) : ''
+  const flash = message
+    ? `<p class="flash${syncError ? '' : ' ok'}">${escapeHtml(message)}</p>`
+    : ''
+  return `<div class="overlay" id="sync-overlay">
+    <div class="sheet">
+      <h2>Skupna zaloga</h2>
+      <p class="hint">Prilepi naslov spletne aplikacije in PIN. Če tega ne nastaviš, ostane seznam samo na tem telefonu.</p>
+      ${flash}
+      <form id="sync-form" class="stack">
+        <label class="field">Naslov spletne aplikacije
+          <input class="search" id="sync-url" name="url" type="url" inputmode="url" autocomplete="off" value="${escapeHtml(url)}" placeholder="https://script.google.com/macros/s/…/exec" />
+        </label>
+        <label class="field">PIN
+          <input class="search" id="sync-pin" name="pin" type="password" autocomplete="off" value="${escapeHtml(pin)}" />
+        </label>
+        <label class="field">Ime tega telefona
+          <input class="search" id="sync-name" name="deviceName" autocomplete="off" value="${escapeHtml(name)}" placeholder="npr. Hebo" />
+        </label>
+        <label class="field">Ali prilepi povezavo za nastavitev
+          <input class="search" id="sync-link" type="text" autocomplete="off" placeholder="#setup?url=…&pin=…" />
+        </label>
+        <button type="submit" class="btn btn-primary">Shrani in poveži</button>
+        <button type="button" class="btn" id="btn-sync-test">Preizkusi povezavo</button>
+        ${configured ? '<button type="button" class="btn btn-danger" id="btn-sync-off">Odklopi (ostane lokalno)</button>' : ''}
+        <button type="button" class="btn btn-ghost" id="btn-sync-close">Zapri</button>
+      </form>
+      ${
+        setup
+          ? `<p class="hint">Povezava za drugi telefon (vsebuje PIN — hrani jo pri sebi):</p>
+        <textarea class="search setup-link" id="sync-setup-link" readonly rows="3">${escapeHtml(setup)}</textarea>
+        <button type="button" class="btn" id="btn-copy-setup">Kopiraj povezavo</button>`
+          : ''
+      }
+    </div>
+  </div>`
+}
+
+function bindSyncSettings(): void {
+  const readForm = (): { url: string; pin: string; deviceName: string } => {
+    const link = (document.getElementById('sync-link') as HTMLInputElement | null)?.value ?? ''
+    const fromLink = parseSetupLink(link)
+    const url = fromLink?.url || (document.getElementById('sync-url') as HTMLInputElement | null)?.value.trim() || ''
+    const pin = fromLink?.pin || (document.getElementById('sync-pin') as HTMLInputElement | null)?.value.trim() || ''
+    const deviceName = (document.getElementById('sync-name') as HTMLInputElement | null)?.value.trim() || ''
+    return { url, pin, deviceName }
+  }
+  document.getElementById('btn-sync-close')?.addEventListener('click', () => showHome())
+  document.getElementById('sync-form')?.addEventListener('submit', (ev) => {
+    ev.preventDefault()
+    const { url, pin, deviceName } = readForm()
+    if (!url || !pin) {
+      screen = { kind: 'sync-settings', message: 'Vpiši naslov in PIN, ali prilepi povezavo za nastavitev.' }
+      render()
+      return
+    }
+    syncConfig = ensureSyncConfig({ url, pin, deviceName })
+    syncError = ''
+    screen = { kind: 'sync-settings', message: 'Shranjeno. Povezujem…' }
+    render()
+    void flushSync().then(() => {
+      screen = {
+        kind: 'sync-settings',
+        message: syncError ? 'Povezava ni uspela. Preveri naslov in PIN.' : 'Povezano. Spremembe se usklajujejo z listom.',
+      }
+      render()
+    })
+  })
+  document.getElementById('btn-sync-test')?.addEventListener('click', () => {
+    const { url, pin, deviceName } = readForm()
+    if (!url || !pin) {
+      screen = { kind: 'sync-settings', message: 'Vpiši naslov in PIN za preizkus.' }
+      render()
+      return
+    }
+    const trial = ensureSyncConfig({ url, pin, deviceName })
+    void syncPing(trial)
+      .then((res) => {
+        screen = {
+          kind: 'sync-settings',
+          message: res.ok ? 'Povezava deluje.' : 'PIN ali naslov ni pravilen.',
+        }
+        if (!res.ok) syncError = res.error || 'ping'
+        else syncError = ''
+        render()
+      })
+      .catch(() => {
+        syncError = 'network'
+        screen = { kind: 'sync-settings', message: 'Povezava ni uspela. Preveri naslov.' }
+        render()
+      })
+  })
+  document.getElementById('btn-sync-off')?.addEventListener('click', () => {
+    clearSyncConfig()
+    syncConfig = undefined
+    syncError = ''
+    showHome('Skupna zaloga je odklopljena. Seznam ostane na tem telefonu.')
+  })
+  document.getElementById('btn-copy-setup')?.addEventListener('click', () => {
+    const text = (document.getElementById('sync-setup-link') as HTMLTextAreaElement | null)?.value ?? ''
+    if (!text) return
+    void navigator.clipboard.writeText(text).then(
+      () => {
+        screen = { kind: 'sync-settings', message: 'Povezava je kopirana.' }
+        render()
+      },
+      () => {
+        screen = { kind: 'sync-settings', message: 'Povezave nisem mogel kopirati. Označi jo in kopiraj ročno.' }
+        render()
+      },
+    )
+  })
 }
 
 function bindCards(): void {
@@ -490,9 +776,11 @@ function bindQuantity(): void {
       ...article,
       kolicina: applyQuantity({ current: article.kolicina, entered, mode: current.mode }),
       updatedAt: nowIso(),
+      updatedBy: deviceLabel(),
     }
     data = upsertArticle(data, next)
     persist()
+    queueMutation(article, next)
     showHome(`Shranjeno: ${next.ime || next.sifra || next.ean} = ${next.kolicina} kos`)
   })
 }
@@ -564,7 +852,7 @@ function bindEdit(): void {
     const existing = screen.article
     const startQty = parseCount(String(fd.get('kolicina') ?? '0')) ?? 0
     const article: Article = existing
-      ? { ...existing, ime, sifra, ean, opomba, skupina, updatedAt: nowIso() }
+      ? { ...existing, ime, sifra, ean, opomba, skupina, updatedAt: nowIso(), updatedBy: deviceLabel() }
       : {
           id: uid(),
           ime,
@@ -574,9 +862,11 @@ function bindEdit(): void {
           skupina,
           kolicina: Math.max(0, startQty),
           updatedAt: nowIso(),
+          updatedBy: deviceLabel(),
         }
     data = upsertArticle(data, article)
     persist()
+    queueMutation(existing, article)
     if (existing) {
       showHome('Artikel je posodobljen.')
     } else {
@@ -588,15 +878,30 @@ function bindEdit(): void {
 function bindReset(): void {
   document.getElementById('btn-cancel-reset')?.addEventListener('click', () => showHome())
   document.getElementById('btn-confirm-reset')?.addEventListener('click', () => {
-    data = resetQuantities(data, nowIso())
+    const prevArticles = data.articles
+    const now = nowIso()
+    data = resetQuantities(data, now)
+    data = {
+      ...data,
+      articles: data.articles.map((a) =>
+        a.updatedAt === now ? { ...a, updatedBy: deviceLabel() } : a,
+      ),
+    }
     persist()
+    if (isConfigured(syncConfig) && syncConfig) {
+      for (const next of data.articles) {
+        const prev = prevArticles.find((a) => a.id === next.id)
+        if (prev && prev.kolicina !== next.kolicina) queueMutation(prev, next, false)
+      }
+      void flushSync()
+    }
     showHome('Količine so ponastavljene. Artikli so ostali.')
   })
 }
 
 async function downloadExport(): Promise<void> {
   const { buildWorkbook, exportFileName, workbookToArrayBuffer } = await import('./export.ts')
-  const workbook = buildWorkbook(data.articles)
+  const workbook = buildWorkbook(liveArticles())
   const buffer = workbookToArrayBuffer(workbook)
   const blob = new Blob([buffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -627,9 +932,11 @@ function bindLinkItems(): void {
         ean: ean || article.ean,
         sifra: article.sifra || sifra,
         updatedAt: nowIso(),
+        updatedBy: deviceLabel(),
       }
       data = upsertArticle(data, next)
       persist()
+      queueMutation(article, next)
       openQuantity(next.id)
     })
   })
@@ -657,6 +964,7 @@ function applyImport(result: ImportResult, mode: 'replace' | 'append'): void {
     importMeta: { fileName: result.fileName || STARTER_FILE_NAME, importedAt: now },
   }
   persist()
+  void flushSync()
   const dup = result.duplicates.length ? ` Možno podvajanje ostaja ločeno: ${result.duplicates.join(', ')}.` : ''
   showHome(`Uvoženih ${incoming.length} artiklov, skupaj ${result.total} kos.${dup}`)
 }
@@ -701,4 +1009,18 @@ function bindImportPreview(): void {
 }
 
 registerServiceWorker()
+if (consumeSetupHash()) {
+  screen = { kind: 'sync-settings', message: 'Povezava za nastavitev je prebrana. Povezujem…' }
+}
+window.addEventListener('online', () => {
+  void flushSync()
+})
+window.addEventListener('offline', () => {
+  updateSyncStatus()
+})
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') void flushSync()
+})
+startSyncLoop()
 render()
+void flushSync()
