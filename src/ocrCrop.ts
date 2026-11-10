@@ -10,6 +10,9 @@ export type CropRect = {
 /** Relativni izrez v predogledu (sredinski pas nalepke). */
 export const TEXT_CROP: CropRect = { x: 0.08, y: 0.26, width: 0.84, height: 0.4 }
 
+/** Ožji pas za 2D kode: TEXT_CROP je pogosto preglobok (roka, miza) za ZXing QR. */
+export const CODE_CROP: CropRect = { x: 0.10, y: 0.22, width: 0.80, height: 0.28 }
+
 export function clampCrop(crop: CropRect): CropRect {
   const x = Math.min(1, Math.max(0, crop.x))
   const y = Math.min(1, Math.max(0, crop.y))
@@ -86,6 +89,39 @@ export async function cropDataUrl(dataUrl: string, crop: CropRect = TEXT_CROP): 
   const rect = sourceRectForCoverCrop(img.naturalWidth, img.naturalHeight, img.naturalWidth, img.naturalHeight, crop)
   const canvas = cropCanvas(img, img.naturalWidth, img.naturalHeight, rect)
   return canvas ? canvasToJpeg(canvas) : undefined
+}
+
+export function cropCanvasByRect(source: HTMLCanvasElement, crop: CropRect): HTMLCanvasElement | undefined {
+  const rect = sourceRectForCoverCrop(source.width, source.height, source.width, source.height, crop)
+  return cropCanvas(source, source.width, source.height, rect)
+}
+
+/** Pomanjšaj, če je daljša stranica večja od maxEdge; sicer vrni izvor. */
+export function scaleCanvasToMaxEdge(source: HTMLCanvasElement, maxEdge: number): HTMLCanvasElement {
+  const edge = Math.max(source.width, source.height)
+  if (edge <= maxEdge || maxEdge < 8) return source
+  const scale = maxEdge / edge
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(source.width * scale))
+  canvas.height = Math.max(1, Math.round(source.height * scale))
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return source
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height)
+  return canvas
+}
+
+/** Pomanjšana celotna slika (data URL) za OCR cele slike. */
+export async function downscaleDataUrl(dataUrl: string, maxEdge = 1000): Promise<string | undefined> {
+  const img = await loadImage(dataUrl)
+  const canvas = document.createElement('canvas')
+  canvas.width = img.naturalWidth
+  canvas.height = img.naturalHeight
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return undefined
+  ctx.drawImage(img, 0, 0)
+  return canvasToJpeg(scaleCanvasToMaxEdge(canvas, maxEdge))
 }
 
 function loadImage(src: string): Promise<HTMLImageElement> {

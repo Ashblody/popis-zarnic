@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { sourceRectForCoverCrop, TEXT_CROP, clampCrop } from './ocrCrop.ts'
+import { sourceRectForCoverCrop, TEXT_CROP, CODE_CROP, clampCrop } from './ocrCrop.ts'
 
 describe('OCR izrez', () => {
   it('ohranja izrez znotraj slike pri prikazu 1:1', () => {
@@ -27,5 +27,15 @@ describe('OCR izrez', () => {
     const c = clampCrop({ x: 0.9, y: 0.9, width: 0.5, height: 0.5 })
     expect(c.x + c.width).toBeLessThanOrEqual(1)
     expect(c.y + c.height).toBeLessThanOrEqual(1)
+  })
+})
+
+describe('CODE_CROP', () => {
+  it('na pokončni 3000×4000 sliki pokrije pas nalepke (~y 1250–1520)', () => {
+    const r = sourceRectForCoverCrop(3000, 4000, 3000, 4000, CODE_CROP)
+    expect(r.sy).toBeLessThanOrEqual(1250)
+    expect(r.sy + r.sh).toBeGreaterThanOrEqual(1520)
+    expect(r.sx).toBeGreaterThanOrEqual(0)
+    expect(r.sx + r.sw).toBeLessThanOrEqual(3000)
   })
 })

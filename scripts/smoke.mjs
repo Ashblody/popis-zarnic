@@ -78,7 +78,7 @@ await page.goto(origin, { waitUntil: 'networkidle0' })
 const title = await page.title()
 if (!title.includes('Popis žarnic')) throw new Error(`Unexpected title: ${title}`)
 const homeText = await page.$eval('#app', (el) => el.innerText)
-if (!homeText.includes('v1.3.0')) throw new Error(`Manjka različica v1.3.0: ${homeText.slice(0, 200)}`)
+if (!homeText.includes('v1.3.1')) throw new Error(`Manjka različica v1.3.1: ${homeText.slice(0, 200)}`)
 if (!(await page.$('#btn-sync'))) throw new Error('Manjka gumb Skupna zaloga')
 
 await page.$eval('#btn-sync', (el) => {

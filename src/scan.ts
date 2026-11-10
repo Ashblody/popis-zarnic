@@ -4,6 +4,12 @@ import {
   type ScanFormat,
   type ScanHit,
 } from './scanParse.ts'
+import {
+  CODE_CROP,
+  TEXT_CROP,
+  cropCanvasByRect,
+  scaleCanvasToMaxEdge,
+} from './ocrCrop.ts'
 
 export type { ScanFormat, ScanHit }
 
@@ -87,7 +93,7 @@ function mapZxingFormat(format: { toString: () => string } | number | string): S
   return table[name] ?? table[name.toUpperCase()] ?? mapNativeFormat(name)
 }
 
-async function decodeAllFromCanvas(canvas: HTMLCanvasElement): Promise<ScanHit[]> {
+export async function decodeAllFromCanvas(canvas: HTMLCanvasElement): Promise<ScanHit[]> {
   const [{ BrowserMultiFormatReader }, { BarcodeFormat, DecodeHintType }] = await Promise.all([
     import('@zxing/browser'),
     import('@zxing/library'),
@@ -112,6 +118,54 @@ async function decodeAllFromCanvas(canvas: HTMLCanvasElement): Promise<ScanHit[]
     }
   }
   return uniqueHits(hits)
+}
+
+function hasLinearHit(hits: ScanHit[]): boolean {
+  return hits.some((h) => h.format === 'ean_13' || h.format === 'ean_8' || h.format === 'upc_a' || h.format === 'upc_e' || h.format === 'code_128' || h.format === 'code_39')
+}
+
+function hasMatrixHit(hits: ScanHit[]): boolean {
+  return hits.some((h) => h.format === 'qr_code' || h.format === 'data_matrix')
+}
+
+function decodeCandidatesFrom(canvas: HTMLCanvasElement): HTMLCanvasElement[] {
+  const out: HTMLCanvasElement[] = []
+  const seen = new Set<string>()
+  const add = (c: HTMLCanvasElement | undefined) => {
+    if (!c) return
+    const key = `${c.width}x${c.height}`
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push(c)
+  }
+  const tight = cropCanvasByRect(canvas, CODE_CROP)
+  const band = cropCanvasByRect(canvas, TEXT_CROP)
+  add(tight)
+  if (tight) add(scaleCanvasToMaxEdge(tight, 2000))
+  if (band) {
+    add(scaleCanvasToMaxEdge(band, 2000))
+    add(scaleCanvasToMaxEdge(band, 1600))
+    add(scaleCanvasToMaxEdge(band, 1300))
+  }
+  return out
+}
+
+/**
+ * ZXing na celi sliki, nato na ožjem pasu in pomanjšanih izrezih.
+ * Na velikih (12 Mpx) slikah z roko v kadru polni kader pogosto vidi samo EAN, QR pa izrez.
+ */
+export async function decodeBarcodesFromCanvas(canvas: HTMLCanvasElement): Promise<ScanHit[]> {
+  let hits = await decodeAllFromCanvas(canvas)
+  if (hasLinearHit(hits) && hasMatrixHit(hits)) return hits
+  for (const candidate of decodeCandidatesFrom(canvas)) {
+    try {
+      hits = uniqueHits([...hits, ...(await decodeAllFromCanvas(candidate))])
+    } catch {
+      /* ta izrez ni dal kode */
+    }
+    if (hasLinearHit(hits) && hasMatrixHit(hits)) return hits
+  }
+  return hits
 }
 
 function canvasFromVideo(video: HTMLVideoElement): HTMLCanvasElement | undefined {
@@ -145,14 +199,30 @@ async function startNativeScan(video: HTMLVideoElement, onResult: (result: ScanR
     try {
       if (video.readyState >= 2) {
         const codes = await detector.detect(video)
-        const hits = uniqueHits(
+        let hits = uniqueHits(
           codes.map((c) => ({
             text: (c.rawValue ?? '').trim(),
             format: mapNativeFormat(c.format ?? ''),
           })),
         )
         if (hits.length) {
-          const frame = captureFrame(video)
+          const canvas = canvasFromVideo(video)
+          const frame = canvas
+            ? (() => {
+                try {
+                  return canvas.toDataURL('image/jpeg', 0.85)
+                } catch {
+                  return undefined
+                }
+              })()
+            : captureFrame(video)
+          if (canvas && !(hasLinearHit(hits) && hasMatrixHit(hits))) {
+            try {
+              hits = uniqueHits([...hits, ...(await decodeBarcodesFromCanvas(canvas))])
+            } catch {
+              /* ostane to, kar je zaznal BarcodeDetector */
+            }
+          }
           await stop()
           onResult({ hits, frame })
           return
@@ -223,7 +293,7 @@ async function startZxingScan(video: HTMLVideoElement, onResult: (result: ScanRe
         onResult({ hits: uniqueHits(hits), frame })
       }
       if (canvas) {
-        void decodeAllFromCanvas(canvas)
+        void decodeBarcodesFromCanvas(canvas)
           .then((extra) => finish([first, ...extra]))
           .catch(() => finish([first]))
       } else {

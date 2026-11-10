@@ -1,7 +1,7 @@
 {
   "name": "popis-zarnic",
   "private": true,
-  "version": "1.3.0",
+  "version": "1.3.1",
   "type": "module",
   "description": "Popis skladišča žarnic — PWA (EAN/QR, OCR tekst, Excel, skupna zaloga)",
   "scripts": {

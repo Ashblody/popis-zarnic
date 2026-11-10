@@ -1,11 +1,12 @@
 import './style.css'
 import { articleMatches } from './search.ts'
 import { applyQuantity, adjustEntered, parseCount, type QuantityMode } from './quantity.ts'
-import { scanErrorMessage, startCameraPreview, startScan, type ScanHandle, type ScanResult } from './scan.ts'
+import { captureFrame, scanErrorMessage, startCameraPreview, startScan, type ScanHandle, type ScanResult } from './scan.ts'
 import { pickPreferredScan } from './scanParse.ts'
-import { suggestFromOcr } from './ocrSuggest.ts'
+import { pickBestOcrText, suggestFromOcr } from './ocrSuggest.ts'
+import { applyOcrPrefill } from './ocrPrefill.ts'
 import { rankArticlesWithoutEan, topMatches } from './linkMatch.ts'
-import { captureViewCrop, cropDataUrl, TEXT_CROP } from './ocrCrop.ts'
+import { captureViewCrop, cropDataUrl, downscaleDataUrl, TEXT_CROP } from './ocrCrop.ts'
 import { formatOcrLabel } from './ocrNormalize.ts'
 import type { ImportResult, ImportedItem } from './importSpreadsheet.ts'
 import { STARTER_FILE_NAME, STARTER_ITEMS } from './starterCatalog.ts'
@@ -792,10 +793,10 @@ function bindScan(): void {
   document.getElementById('btn-text-new')?.addEventListener('click', () => {
     if (screen.kind !== 'scan') return
     const raw = screen.ocrText || ''
-    const label = formatOcrLabel(raw)
     const sug = suggestFromOcr(raw)
+    const label = [sug.sifra, sug.ime].filter(Boolean).join(' · ') || formatOcrLabel(raw)
     void stopScan().then(() => {
-      linkQuery = label
+      linkQuery = [sug.sifra, sug.ime].filter(Boolean).join(' ')
       linkQueryLocked = false
       screen = {
         kind: 'edit',
@@ -896,27 +897,29 @@ async function runOcr(): Promise<void> {
   render()
   try {
     const { recognizeLabel } = await import('./ocr.ts')
+    const sources: string[] = []
     const cropped = await cropDataUrl(frame)
-    const text = await recognizeLabel(cropped || frame)
+    if (cropped) sources.push(cropped)
+    const small = await downscaleDataUrl(frame, 1000)
+    if (small) sources.push(small)
+    if (!sources.length) sources.push(frame)
+    const texts: string[] = []
+    for (const src of sources) texts.push(await recognizeLabel(src))
+    const text = pickBestOcrText(texts)
     if (screen.kind !== 'edit' || screen.frame !== frame) return
-    const sug = suggestFromOcr(text)
-    const sifra = previousSifra || sug.sifra
-    const ime = sug.ime
-    const label = formatOcrLabel(text)
-    let message = 'Nisem prebral šifre ali imena. Vpiši ročno ali poskusi znova.'
-    if (sug.sifra || sug.ime || label) {
-      message = 'Predlog z napisa. Predloge povezave sem razvrstil po napisu — potrdi, preden shraniš.'
-    }
-    if (!linkQueryLocked) {
-      const bits = [sifra, ime, label || text].filter(Boolean).join(' ')
-      if (bits.trim()) linkQuery = bits
-    }
+    const applied = applyOcrPrefill({
+      previousSifra,
+      previousEan: screen.eanPrefill ?? '',
+      sug: suggestFromOcr(text),
+    })
+    if (!linkQueryLocked && applied.linkBits.trim()) linkQuery = applied.linkBits
     screen = {
       ...screen,
-      sifraPrefill: sifra,
-      imePrefill: ime || screen.imePrefill,
+      sifraPrefill: applied.sifra,
+      eanPrefill: applied.ean || screen.eanPrefill,
+      imePrefill: applied.ime || screen.imePrefill,
       ocrStatus: 'done',
-      ocrMessage: message,
+      ocrMessage: applied.message,
     }
     render()
   } catch {
@@ -944,18 +947,28 @@ async function runTextOcr(): Promise<void> {
   render()
   try {
     const { recognizeLabel } = await import('./ocr.ts')
-    const text = await recognizeLabel(frame)
+    const sources: string[] = [frame]
+    const full = captureFrame(video)
+    if (full) {
+      const small = await downscaleDataUrl(full, 1000)
+      if (small) sources.push(small)
+    }
+    const texts: string[] = []
+    for (const src of sources) texts.push(await recognizeLabel(src))
+    const text = pickBestOcrText(texts)
     if (screen.kind !== 'scan' || screen.mode !== 'text') return
-    const label = formatOcrLabel(text)
-    const matches = topMatches(liveArticles(), label || text, 5)
+    const sug = suggestFromOcr(text)
+    const label = [sug.sifra, sug.ime].filter(Boolean).join(' · ') || formatOcrLabel(text)
+    const query = [sug.sifra, sug.ime].filter(Boolean).join(' ') || label
+    const matches = topMatches(liveArticles(), query, 5)
     screen = {
       ...screen,
       ocrStatus: 'done',
       ocrText: text,
       ocrMessage: text
         ? matches.length
-          ? `Prebral sem: ${label || text}. Izberi artikel ali dodaj novega.`
-          : `Prebral sem: ${label || text}. Nisem našel podobnega artikla.`
+          ? `Prebral sem: ${label}. Izberi artikel ali dodaj novega.`
+          : `Prebral sem: ${label}. Nisem našel podobnega artikla.`
         : 'Nisem prebral napisa. Približaj na 10-20 cm in poskusi znova.',
     }
     render()

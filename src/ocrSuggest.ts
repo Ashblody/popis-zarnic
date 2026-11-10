@@ -92,3 +92,28 @@ export function suggestFromOcr(text: string): OcrSuggestion {
   const ime = [brand, model].filter(Boolean).join(' ')
   return { sifra, ime }
 }
+
+/** Višja ocena = bolj uporaben OCR izhod (šifra, model), ne daljše smetje. */
+export function scoreOcrText(text: string): number {
+  const sug = suggestFromOcr(text)
+  let score = 0
+  if (sug.sifra) score += 3
+  if (sug.ime) score += 2
+  if (extractBrand(text)) score += 1
+  const compact = text.replace(/\s+/g, ' ').trim()
+  if (compact.length >= 8 && compact.length <= 240) score += 0.5
+  return score
+}
+
+export function pickBestOcrText(texts: string[]): string {
+  let best = texts[0] ?? ''
+  let bestScore = -1
+  for (const text of texts) {
+    const score = scoreOcrText(text)
+    if (score > bestScore) {
+      best = text
+      bestScore = score
+    }
+  }
+  return best
+}
