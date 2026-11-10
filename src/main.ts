@@ -51,7 +51,7 @@ import {
   syncPush,
 } from './syncClient.ts'
 
-const APP_VERSION = '1.3.0'
+const APP_VERSION = '1.3.1'
 
 type OcrStatus = 'idle' | 'running' | 'done' | 'error'
 
