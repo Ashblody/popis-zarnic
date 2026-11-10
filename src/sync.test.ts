@@ -8,6 +8,9 @@ import {
   matchLocalToRemote,
   opFromUpsert,
   opsAfterRemap,
+  DEFAULT_SYNC_URL,
+  effectiveSyncUrl,
+  isConfigured,
   parseSetupLink,
   seedPendingFromLocal,
   syncStatusText,
@@ -162,5 +165,19 @@ describe('seedPendingFromLocal', () => {
     expect(seeded[0]?.qtyDelta).toBe(2)
     const again = seedPendingFromLocal(local, remote, seeded, 'phone-a')
     expect(again[0]?.qtyDelta).toBe(2)
+  })
+})
+
+describe('privzeti naslov in PIN', () => {
+  it('ima vgrajen javni /exec naslov', () => {
+    expect(DEFAULT_SYNC_URL).toMatch(/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/)
+    expect(effectiveSyncUrl(undefined)).toBe(DEFAULT_SYNC_URL)
+    expect(effectiveSyncUrl({ url: '  ', pin: 'x', deviceId: '', deviceName: '', pending: [] })).toBe(DEFAULT_SYNC_URL)
+  })
+
+  it('nastavitev zahteva samo PIN, ne naslova', () => {
+    expect(isConfigured({ pin: '1234' })).toBe(true)
+    expect(isConfigured({ url: DEFAULT_SYNC_URL })).toBe(false)
+    expect(isConfigured({ pin: '  ' })).toBe(false)
   })
 })

@@ -78,8 +78,37 @@ await page.goto(origin, { waitUntil: 'networkidle0' })
 const title = await page.title()
 if (!title.includes('Popis žarnic')) throw new Error(`Unexpected title: ${title}`)
 const homeText = await page.$eval('#app', (el) => el.innerText)
-if (!homeText.includes('v1.2.0')) throw new Error(`Manjka različica v1.2.0: ${homeText.slice(0, 200)}`)
+if (!homeText.includes('v1.2.1')) throw new Error(`Manjka različica v1.2.1: ${homeText.slice(0, 200)}`)
 if (!(await page.$('#btn-sync'))) throw new Error('Manjka gumb Skupna zaloga')
+
+await page.$eval('#btn-sync', (el) => {
+  if (el instanceof HTMLElement) {
+    el.scrollIntoView({ block: 'center' })
+    el.click()
+  }
+})
+await page.waitForSelector('#sync-overlay #sync-name', { timeout: 8000 })
+const syncTitle = await page.$eval('#sync-overlay h2', (el) => el.textContent || '')
+if (!syncTitle.includes('Skupna zaloga')) throw new Error(`Nastavitve skupne zaloge: ${syncTitle}`)
+if (!(await page.$('#sync-pin'))) throw new Error('Manjka polje PIN')
+const urlVisible = await page.$eval('#sync-url', (el) => {
+  const style = window.getComputedStyle(el)
+  const details = el.closest('details')
+  return style.display !== 'none' && !!(details && details.open)
+})
+if (urlVisible) throw new Error('Polje naslova mora biti skrito pod Napredno')
+const summary = await page.$eval('#sync-advanced summary', (el) => el.textContent || '')
+if (!summary.includes('Napredno')) throw new Error('Manjka Napredno')
+await page.$eval('#sync-advanced summary', (el) => { if (el instanceof HTMLElement) el.click() })
+const defaultUrl = await page.$eval('#sync-url', (el) => el instanceof HTMLInputElement ? el.value : '')
+if (!defaultUrl.includes('/macros/s/') || !defaultUrl.endsWith('/exec')) {
+  throw new Error(`Privzeti naslov ni vgrajen: ${defaultUrl}`)
+}
+await page.$eval('#sync-overlay #btn-sync-close', (el) => {
+  if (el instanceof HTMLElement) el.click()
+})
+await page.waitForFunction(() => !document.querySelector('#sync-overlay'))
+
 
 await page.click('#btn-new')
 await page.waitForSelector('#edit-form')
@@ -118,19 +147,6 @@ while (Date.now() < deadline) {
 }
 if (!downloaded) throw new Error('xlsx se ni prenesel')
 
-await page.$eval('#btn-sync', (el) => {
-  if (el instanceof HTMLElement) {
-    el.scrollIntoView({ block: 'center' })
-    el.click()
-  }
-})
-await page.waitForSelector('#sync-overlay #btn-sync-close')
-const syncTitle = await page.$eval('#sync-overlay h2', (el) => el.textContent || '')
-if (!syncTitle.includes('Skupna zaloga')) throw new Error(`Nastavitve skupne zaloge: ${syncTitle}`)
-await page.$eval('#sync-overlay #btn-sync-close', (el) => {
-  if (el instanceof HTMLElement) el.click()
-})
-await page.waitForFunction(() => !document.querySelector('#sync-overlay'))
 
 await page.$eval('#btn-scan', (el) => {
   if (el instanceof HTMLElement) {

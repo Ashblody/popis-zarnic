@@ -345,3 +345,16 @@ textarea.setup-link {
   font-weight: 400;
   resize: vertical;
 }
+
+details.advanced {
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+details.advanced summary {
+  cursor: pointer;
+  font-weight: 650;
+  color: var(--muted);
+  padding: 8px 0;
+}

@@ -42,8 +42,17 @@ export type SyncConfig = {
 
 export const SYNC_SETTINGS_KEY = 'popis-zarnic-sync-v1'
 
+/** Javni naslov spletne aplikacije (ni skrivnost). PIN ostane v Script Properties. */
+export const DEFAULT_SYNC_URL =
+  'https://script.google.com/macros/s/AKfycbzQGpKejoWzXcE2KDTmjreGaeQ5jH_mQqRGtv1pyjzCbFeyJRGT7cevJBGHj-ZXgy_e/exec'
+
+export function effectiveSyncUrl(config: Partial<SyncConfig> | undefined): string {
+  const url = (config?.url || DEFAULT_SYNC_URL).trim().replace(/\/+$/, '')
+  return url || DEFAULT_SYNC_URL
+}
+
 export function isConfigured(config: Partial<SyncConfig> | undefined): boolean {
-  return Boolean(config?.url?.trim() && config?.pin)
+  return Boolean(config?.pin?.trim())
 }
 
 export function compactOps(ops: SyncOp[]): SyncOp[] {

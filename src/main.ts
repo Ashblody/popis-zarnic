@@ -27,6 +27,8 @@ import {
   applyPull,
   buildSetupLink,
   enqueueOp,
+  DEFAULT_SYNC_URL,
+  effectiveSyncUrl,
   isConfigured,
   matchLocalToRemote,
   opFromUpsert,
@@ -46,7 +48,7 @@ import {
   syncPush,
 } from './syncClient.ts'
 
-const APP_VERSION = '1.2.0'
+const APP_VERSION = '1.2.1'
 
 type OcrStatus = 'idle' | 'running' | 'done' | 'error'
 
@@ -87,6 +89,16 @@ function persist(): void {
 
 function deviceLabel(): string {
   return (syncConfig?.deviceName || syncConfig?.deviceId || 'telefon').trim()
+}
+
+function syncErrorMessage(error?: string): string {
+  if (error === 'google_login') {
+    return 'Google zahteva prijavo. V namestitvi skripta mora biti dostop »Kdorkoli« (tudi brez Google računa), ne samo »Kdorkoli z Google Računom«.'
+  }
+  if (error === 'bad_pin') return 'PIN ni pravilen.'
+  if (error === 'timeout') return 'Povezava je potekla. Poskusi znova.'
+  if (error === 'network') return 'Povezava ni uspela. Preveri internet.'
+  return 'Povezava ni uspela. Preveri PIN.'
 }
 
 function currentSyncStatus(): string {
@@ -549,37 +561,40 @@ function bindHome(): void {
 }
 
 function renderSyncSettings(message?: string): string {
-  const url = syncConfig?.url ?? ''
+  const url = effectiveSyncUrl(syncConfig)
   const pin = syncConfig?.pin ?? ''
   const name = syncConfig?.deviceName ?? ''
   const configured = isConfigured(syncConfig)
   const base = `${location.origin}${import.meta.env.BASE_URL}`
-  const setup = configured && syncConfig ? buildSetupLink(base, syncConfig.url, syncConfig.pin) : ''
+  const setup = configured && syncConfig ? buildSetupLink(base, effectiveSyncUrl(syncConfig), syncConfig.pin) : ''
   const flash = message
     ? `<p class="flash${syncError ? '' : ' ok'}">${escapeHtml(message)}</p>`
     : ''
   return `<div class="overlay" id="sync-overlay">
     <div class="sheet">
       <h2>Skupna zaloga</h2>
-      <p class="hint">Prilepi naslov spletne aplikacije in PIN. Če tega ne nastaviš, ostane seznam samo na tem telefonu.</p>
+      <p class="hint">Vpiši PIN in ime tega telefona. Če PIN ni vpisán, ostane seznam samo na tem telefonu.</p>
       ${flash}
       <form id="sync-form" class="stack">
-        <label class="field">Naslov spletne aplikacije
-          <input class="search" id="sync-url" name="url" type="url" inputmode="url" autocomplete="off" value="${escapeHtml(url)}" placeholder="https://script.google.com/macros/s/…/exec" />
-        </label>
         <label class="field">PIN
-          <input class="search" id="sync-pin" name="pin" type="password" autocomplete="off" value="${escapeHtml(pin)}" />
+          <input class="search" id="sync-pin" name="pin" type="password" inputmode="numeric" autocomplete="off" value="${escapeHtml(pin)}" />
         </label>
         <label class="field">Ime tega telefona
           <input class="search" id="sync-name" name="deviceName" autocomplete="off" value="${escapeHtml(name)}" placeholder="npr. Hebo" />
-        </label>
-        <label class="field">Ali prilepi povezavo za nastavitev
-          <input class="search" id="sync-link" type="text" autocomplete="off" placeholder="#setup?url=…&pin=…" />
         </label>
         <button type="submit" class="btn btn-primary">Shrani in poveži</button>
         <button type="button" class="btn" id="btn-sync-test">Preizkusi povezavo</button>
         ${configured ? '<button type="button" class="btn btn-danger" id="btn-sync-off">Odklopi (ostane lokalno)</button>' : ''}
         <button type="button" class="btn btn-ghost" id="btn-sync-close">Zapri</button>
+        <details class="advanced" id="sync-advanced">
+          <summary>Napredno</summary>
+          <label class="field">Naslov spletne aplikacije
+            <input class="search" id="sync-url" name="url" type="url" inputmode="url" autocomplete="off" value="${escapeHtml(url)}" placeholder="${escapeHtml(DEFAULT_SYNC_URL)}" />
+          </label>
+          <label class="field">Ali prilepi povezavo za nastavitev
+            <input class="search" id="sync-link" type="text" autocomplete="off" placeholder="#setup?url=…&amp;pin=…" />
+          </label>
+        </details>
       </form>
       ${
         setup
@@ -596,7 +611,10 @@ function bindSyncSettings(): void {
   const readForm = (): { url: string; pin: string; deviceName: string } => {
     const link = (document.getElementById('sync-link') as HTMLInputElement | null)?.value ?? ''
     const fromLink = parseSetupLink(link)
-    const url = fromLink?.url || (document.getElementById('sync-url') as HTMLInputElement | null)?.value.trim() || ''
+    const url =
+      fromLink?.url ||
+      (document.getElementById('sync-url') as HTMLInputElement | null)?.value.trim() ||
+      DEFAULT_SYNC_URL
     const pin = fromLink?.pin || (document.getElementById('sync-pin') as HTMLInputElement | null)?.value.trim() || ''
     const deviceName = (document.getElementById('sync-name') as HTMLInputElement | null)?.value.trim() || ''
     return { url, pin, deviceName }
@@ -605,8 +623,8 @@ function bindSyncSettings(): void {
   document.getElementById('sync-form')?.addEventListener('submit', (ev) => {
     ev.preventDefault()
     const { url, pin, deviceName } = readForm()
-    if (!url || !pin) {
-      screen = { kind: 'sync-settings', message: 'Vpiši naslov in PIN, ali prilepi povezavo za nastavitev.' }
+    if (!pin) {
+      screen = { kind: 'sync-settings', message: 'Vpiši PIN, ali prilepi povezavo za nastavitev.' }
       render()
       return
     }
@@ -617,15 +635,15 @@ function bindSyncSettings(): void {
     void flushSync().then(() => {
       screen = {
         kind: 'sync-settings',
-        message: syncError ? 'Povezava ni uspela. Preveri naslov in PIN.' : 'Povezano. Spremembe se usklajujejo z listom.',
+        message: syncError ? syncErrorMessage(syncError) : 'Povezano. Spremembe se usklajujejo z listom.',
       }
       render()
     })
   })
   document.getElementById('btn-sync-test')?.addEventListener('click', () => {
     const { url, pin, deviceName } = readForm()
-    if (!url || !pin) {
-      screen = { kind: 'sync-settings', message: 'Vpiši naslov in PIN za preizkus.' }
+    if (!pin) {
+      screen = { kind: 'sync-settings', message: 'Vpiši PIN za preizkus.' }
       render()
       return
     }
@@ -634,7 +652,7 @@ function bindSyncSettings(): void {
       .then((res) => {
         screen = {
           kind: 'sync-settings',
-          message: res.ok ? 'Povezava deluje.' : 'PIN ali naslov ni pravilen.',
+          message: res.ok ? 'Povezava deluje.' : syncErrorMessage(res.error),
         }
         if (!res.ok) syncError = res.error || 'ping'
         else syncError = ''
@@ -642,7 +660,7 @@ function bindSyncSettings(): void {
       })
       .catch(() => {
         syncError = 'network'
-        screen = { kind: 'sync-settings', message: 'Povezava ni uspela. Preveri naslov.' }
+        screen = { kind: 'sync-settings', message: syncErrorMessage('network') }
         render()
       })
   })

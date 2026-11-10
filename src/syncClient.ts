@@ -1,6 +1,8 @@
 import { uid } from './storage.ts'
 import {
+  DEFAULT_SYNC_URL,
   SYNC_SETTINGS_KEY,
+  effectiveSyncUrl,
   isConfigured,
   type RemoteArticle,
   type SyncConfig,
@@ -9,6 +11,8 @@ import {
 
 const CALLBACK_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
+export { DEFAULT_SYNC_URL, effectiveSyncUrl, isConfigured }
+
 export function loadSyncConfig(): SyncConfig | undefined {
   try {
     const raw = localStorage.getItem(SYNC_SETTINGS_KEY)
@@ -16,7 +20,7 @@ export function loadSyncConfig(): SyncConfig | undefined {
     const parsed = JSON.parse(raw) as Partial<SyncConfig>
     if (!parsed || typeof parsed !== 'object') return undefined
     const config: SyncConfig = {
-      url: typeof parsed.url === 'string' ? parsed.url : '',
+      url: typeof parsed.url === 'string' && parsed.url.trim() ? parsed.url.trim() : DEFAULT_SYNC_URL,
       pin: typeof parsed.pin === 'string' ? parsed.pin : '',
       deviceId: typeof parsed.deviceId === 'string' && parsed.deviceId ? parsed.deviceId : uid('dev'),
       deviceName: typeof parsed.deviceName === 'string' ? parsed.deviceName : '',
@@ -37,10 +41,11 @@ export function clearSyncConfig(): void {
   localStorage.removeItem(SYNC_SETTINGS_KEY)
 }
 
-export function ensureSyncConfig(partial: { url: string; pin: string; deviceName?: string }): SyncConfig {
+export function ensureSyncConfig(partial: { url?: string; pin: string; deviceName?: string }): SyncConfig {
   const prev = loadSyncConfig()
+  const url = (partial.url ?? prev?.url ?? DEFAULT_SYNC_URL).trim() || DEFAULT_SYNC_URL
   const config: SyncConfig = {
-    url: partial.url.trim(),
+    url,
     pin: partial.pin.trim(),
     deviceId: prev?.deviceId || uid('dev'),
     deviceName: (partial.deviceName ?? prev?.deviceName ?? '').trim(),
@@ -53,8 +58,42 @@ export function ensureSyncConfig(partial: { url: string; pin: string; deviceName
 
 type SyncResponse = { ok: boolean; error?: string; pong?: boolean; articles?: RemoteArticle[] }
 
-function normalizeExecUrl(url: string): string {
-  return url.trim().replace(/\/+$/, '')
+export function parseSyncResponseText(text: string): SyncResponse {
+  const trimmed = text.trim()
+  if (!trimmed) return { ok: false, error: 'empty' }
+  if (/accounts\.google\.com|Sign in – Google|Sign in - Google|Use your Google Account/i.test(trimmed)) {
+    return { ok: false, error: 'google_login' }
+  }
+  const jsonp = trimmed.match(/^[A-Za-z_][A-Za-z0-9_]*\((.*)\)\s*$/s)
+  const raw = jsonp ? jsonp[1] : trimmed
+  try {
+    const parsed = JSON.parse(raw) as SyncResponse
+    if (!parsed || typeof parsed !== 'object') return { ok: false, error: 'bad_json' }
+    return parsed
+  } catch {
+    return { ok: false, error: 'bad_json' }
+  }
+}
+
+async function postPlain(webAppUrl: string, payload: Record<string, unknown>, timeoutMs = 25000): Promise<SyncResponse> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const res = await fetch(effectiveSyncUrl({ url: webAppUrl }), {
+      method: 'POST',
+      mode: 'cors',
+      redirect: 'follow',
+      credentials: 'omit',
+      // text/plain is a CORS-safelisted type: no preflight, no custom headers.
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    })
+    const text = await res.text()
+    return parseSyncResponseText(text)
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 export function jsonpRequest(webAppUrl: string, params: Record<string, string>, timeoutMs = 20000): Promise<SyncResponse> {
@@ -64,7 +103,7 @@ export function jsonpRequest(webAppUrl: string, params: Record<string, string>, 
       reject(new Error('callback'))
       return
     }
-    const target = new URL(normalizeExecUrl(webAppUrl))
+    const target = new URL(effectiveSyncUrl({ url: webAppUrl }))
     for (const [key, value] of Object.entries(params)) {
       if (value !== undefined) target.searchParams.set(key, value)
     }
@@ -92,29 +131,54 @@ export function jsonpRequest(webAppUrl: string, params: Record<string, string>, 
 
 const CHUNK = 12
 
+function payloadOf(config: SyncConfig, action: string, ops?: SyncOp[]): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    action,
+    pin: config.pin,
+    device: config.deviceName || config.deviceId,
+  }
+  if (ops) body.ops = ops
+  return body
+}
+
+async function syncCall(config: SyncConfig, action: string, ops?: SyncOp[]): Promise<SyncResponse> {
+  const url = effectiveSyncUrl(config)
+  try {
+    return await postPlain(url, payloadOf(config, action, ops))
+  } catch (err) {
+    if (typeof document === 'undefined') {
+      const message = err instanceof Error ? err.message : 'network'
+      return { ok: false, error: message === 'The user aborted a request.' ? 'timeout' : 'network' }
+    }
+    try {
+      const params: Record<string, string> = {
+        action,
+        pin: config.pin,
+        device: config.deviceName || config.deviceId,
+      }
+      if (ops) params.ops = JSON.stringify(ops)
+      return await jsonpRequest(url, params)
+    } catch {
+      const message = err instanceof Error && err.name === 'AbortError' ? 'timeout' : 'network'
+      return { ok: false, error: message }
+    }
+  }
+}
+
 export async function syncPing(config: SyncConfig): Promise<SyncResponse> {
-  return jsonpRequest(config.url, { action: 'ping', pin: config.pin, device: config.deviceName || config.deviceId })
+  return syncCall(config, 'ping')
 }
 
 export async function syncPull(config: SyncConfig): Promise<SyncResponse> {
-  return jsonpRequest(config.url, { action: 'pull', pin: config.pin, device: config.deviceName || config.deviceId })
+  return syncCall(config, 'pull')
 }
 
 export async function syncPush(config: SyncConfig, ops: SyncOp[]): Promise<SyncResponse> {
   if (!ops.length) return syncPull(config)
-  const compacted = ops
   let last: SyncResponse = { ok: false, error: 'empty' }
-  for (let i = 0; i < compacted.length; i += CHUNK) {
-    const slice = compacted.slice(i, i + CHUNK)
-    last = await jsonpRequest(config.url, {
-      action: 'push',
-      pin: config.pin,
-      device: config.deviceName || config.deviceId,
-      ops: JSON.stringify(slice),
-    })
+  for (let i = 0; i < ops.length; i += CHUNK) {
+    last = await syncCall(config, 'push', ops.slice(i, i + CHUNK))
     if (!last.ok) return last
   }
   return last
 }
-
-export { isConfigured }
