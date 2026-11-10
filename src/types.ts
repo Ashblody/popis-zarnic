@@ -2,9 +2,8 @@
  * Podatkovni model v1.
  *
  * Kasnejše faze (še niso zgrajene, polja so namerno pripravljena):
- * - Uvoz obstoječega Excela: InventoryData.importMeta (ime datoteke, čas, preslikava vrstic).
  * - Skupna zaloga prek Google Sheet + Apps Script: Article.remoteId, InventoryData.sync.
- * - OCR napisa (Tesseract.js) je samo predlog pred shranitvijo — ne hrani se, dokler
+ * - OCR napisa (Tesseract.js) je predlog pred shranitvijo — ne shrani se, dokler
  *   uporabnik ne potrdi artikla (potem gre v šifra/ime/ean).
  */
 
@@ -17,6 +16,8 @@ export type Article = {
   ean: string
   kolicina: number
   opomba: string
+  /** Družina iz popisa (npr. NL-T5, RX-L, RL-PAR). */
+  skupina?: string
   updatedAt: string
   /** Id vrstice v Google Sheetu, ko pride skupna zaloga. */
   remoteId?: string

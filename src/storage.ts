@@ -23,7 +23,8 @@ export function isArticle(raw: unknown): raw is Article {
     typeof a.kolicina === 'number' &&
     Number.isFinite(a.kolicina) &&
     typeof a.opomba === 'string' &&
-    typeof a.updatedAt === 'string'
+    typeof a.updatedAt === 'string' &&
+    (a.skupina === undefined || typeof a.skupina === 'string')
   )
 }
 
@@ -75,6 +76,12 @@ export function findByEan(data: InventoryData, ean: string): Article | undefined
 
 export function findById(data: InventoryData, id: string): Article | undefined {
   return data.articles.find((a) => a.id === id)
+}
+
+export function findBySifra(data: InventoryData, sifra: string): Article | undefined {
+  const needle = sifra.trim()
+  if (!needle) return undefined
+  return data.articles.find((a) => a.sifra.trim() === needle)
 }
 
 export function upsertArticle(data: InventoryData, article: Article): InventoryData {

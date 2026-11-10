@@ -1,11 +1,18 @@
 import './style.css'
 import { articleMatches } from './search.ts'
 import { applyQuantity, adjustEntered, parseCount, type QuantityMode } from './quantity.ts'
-import { scanErrorMessage, startScan, type ScanHandle } from './scan.ts'
+import { scanErrorMessage, startScan, type ScanHandle, type ScanResult } from './scan.ts'
+import { pickPreferredScan } from './scanParse.ts'
+import { suggestFromOcr } from './ocrSuggest.ts'
+import { rankArticlesWithoutEan } from './linkMatch.ts'
+import type { ImportResult, ImportedItem } from './importSpreadsheet.ts'
+import { STARTER_FILE_NAME, STARTER_ITEMS } from './starterCatalog.ts'
+import { inferGroupFromName } from './group.ts'
 import {
   escapeHtml,
   findByEan,
   findById,
+  findBySifra,
   formatDateTime,
   loadData,
   normalizeEan,
@@ -17,18 +24,34 @@ import {
 } from './storage.ts'
 import type { Article, InventoryData } from './types.ts'
 
+const APP_VERSION = '1.1.0'
+
+type OcrStatus = 'idle' | 'running' | 'done' | 'error'
+
 type Screen =
   | { kind: 'home' }
   | { kind: 'scan'; error?: string }
   | { kind: 'quantity'; articleId: string; entered: string; mode: QuantityMode }
-  | { kind: 'edit'; article?: Article; eanPrefill?: string }
+  | {
+      kind: 'edit'
+      article?: Article
+      eanPrefill?: string
+      sifraPrefill?: string
+      imePrefill?: string
+      frame?: string
+      ocrStatus?: OcrStatus
+      ocrMessage?: string
+    }
   | { kind: 'confirm-reset' }
+  | { kind: 'import-preview'; result: ImportResult }
 
 let data: InventoryData = loadData()
 let query = ''
 let screen: Screen = { kind: 'home' }
 let banner = ''
 let scanHandle: ScanHandle | undefined
+let linkQuery = ''
+let linkQueryLocked = false
 const app = document.querySelector('#app')
 
 function persist(): void {
@@ -82,9 +105,15 @@ function render(): void {
     return
   }
   if (screen.kind === 'edit') {
-    app.innerHTML = renderHome() + renderEdit(screen.article, screen.eanPrefill)
+    app.innerHTML = renderHome() + renderEdit(screen)
     bindHome()
     bindEdit()
+    return
+  }
+  if (screen.kind === 'import-preview') {
+    app.innerHTML = renderHome() + renderImportPreview(screen.result)
+    bindHome()
+    bindImportPreview()
     return
   }
   app.innerHTML = renderHome() + renderResetConfirm()
@@ -96,15 +125,13 @@ function visibleArticles(): Article[] {
   return data.articles.filter((a) => articleMatches(query, a))
 }
 
-function renderHome(): string {
-  const list = visibleArticles()
-  const cards = list.length
-    ? list
-        .map((a) => {
-          return `<article class="card" data-id="${escapeHtml(a.id)}">
+
+function renderArticleCard(a: Article): string {
+  const skupina = a.skupina ? `${escapeHtml(a.skupina)} · ` : ''
+  return `<article class="card" data-id="${escapeHtml(a.id)}">
             <div class="card-main" data-action="qty">
               <h2>${escapeHtml(a.ime || '(brez imena)')}</h2>
-              <div class="meta">${escapeHtml(a.sifra || 'brez šifre')}${a.ean ? ` · EAN ${escapeHtml(a.ean)}` : ''}</div>
+              <div class="meta">${skupina}${escapeHtml(a.sifra || 'brez šifre')}${a.ean ? ` · EAN ${escapeHtml(a.ean)}` : ''}</div>
               <div class="meta">spremenjeno ${escapeHtml(formatDateTime(a.updatedAt))}</div>
               <button type="button" class="edit-link" data-action="edit">Uredi</button>
             </div>
@@ -112,11 +139,17 @@ function renderHome(): string {
               <b>${a.kolicina}</b><span>kos</span>
             </button>
           </article>`
-        })
+}
+
+function renderHome(): string {
+  const list = visibleArticles()
+  const cards = list.length
+    ? list
+        .map((a) => renderArticleCard(a))
         .join('')
     : `<p class="empty">${
         data.articles.length === 0
-          ? 'Ni artiklov. Skeniraj škatlo ali dodaj artikel ročno.'
+          ? 'Ni artiklov. Naloži seznam žarnic, skeniraj škatlo ali dodaj artikel ročno.'
           : 'Nisem našel artikla s tem iskanjem.'
       }</p>`
 
@@ -126,7 +159,7 @@ function renderHome(): string {
       <img src="${import.meta.env.BASE_URL}icon-192.png" alt="" width="48" height="48" />
       <div>
         <h1>Popis žarnic</h1>
-        <p class="sub">${data.articles.length} artiklov na tem telefonu</p>
+        <p class="sub">${data.articles.length} artiklov na tem telefonu · v${APP_VERSION}</p>
       </div>
     </header>
     ${notice}
@@ -134,8 +167,17 @@ function renderHome(): string {
       <input class="search" id="search" type="search" placeholder="Išči po imenu, šifri ali EAN" value="${escapeHtml(query)}" />
       <button type="button" class="btn btn-primary" id="btn-scan">Skeniraj</button>
       <button type="button" class="btn" id="btn-new">Nov artikel</button>
+      ${
+        data.articles.length === 0
+          ? `<button type="button" class="btn btn-primary" id="btn-starter">Naloži seznam žarnic (81)</button>`
+          : ''
+      }
       <div class="row-actions">
+        <button type="button" class="btn" id="btn-import">Uvozi Excel</button>
         <button type="button" class="btn" id="btn-export">Izvozi v Excel</button>
+      </div>
+      <input id="file-import" type="file" accept=".xlsx,.xls,.xlt,.ods,.csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.oasis.opendocument.spreadsheet,text/csv" hidden />
+      <div class="row-actions">
         <button type="button" class="btn btn-danger" id="btn-reset">Nov popis</button>
       </div>
     </div>
@@ -146,7 +188,7 @@ function renderScan(error?: string): string {
   return `<div class="overlay" id="scan-overlay">
     <div class="sheet">
       <h2>Skeniraj kodo</h2>
-      <p class="hint">Usmeri kamero na črtno kodo na škatli.</p>
+      <p class="hint">Usmeri kamero na črtno kodo ali QR na škatli.</p>
       <div class="scan-wrap">
         <video id="scan-video" playsinline muted autoplay></video>
         <div class="scan-hint">Drži kodo v sredini slike</div>
@@ -191,27 +233,96 @@ function renderQuantity(article: Article, entered: string, mode: QuantityMode): 
   </div>`
 }
 
-function renderEdit(article?: Article, eanPrefill?: string): string {
+function renderEdit(state: Extract<Screen, { kind: 'edit' }>): string {
+  const article = state.article
   const isNew = !article
+  const imeValue = article?.ime ?? state.imePrefill ?? ''
+  const sifraValue = article?.sifra ?? state.sifraPrefill ?? ''
+  const eanValue = article?.ean ?? state.eanPrefill ?? ''
+  const showOcr = isNew && Boolean(state.frame)
+  const ocrBusy = state.ocrStatus === 'running'
+  const ocrBtn = showOcr
+    ? `<button type="button" class="btn" id="btn-ocr" ${ocrBusy ? 'disabled' : ''}>${
+        ocrBusy ? 'Berem napis…' : 'Preberi napis'
+      }</button>`
+    : ''
+  const ocrNote = state.ocrMessage
+    ? `<p class="flash ${state.ocrStatus === 'error' ? '' : 'ok'}" id="ocr-note">${escapeHtml(state.ocrMessage)}</p>`
+    : ''
   return `<div class="overlay">
     <div class="sheet">
       <h2>${isNew ? 'Nov artikel' : 'Uredi artikel'}</h2>
+      ${ocrNote}
       <form id="edit-form">
         <label for="f-ime">Ime</label>
-        <input id="f-ime" name="ime" type="text" required value="${escapeHtml(article?.ime ?? '')}" />
+        <input id="f-ime" name="ime" type="text" required value="${escapeHtml(imeValue)}" />
         <label for="f-sifra">Šifra</label>
-        <input id="f-sifra" name="sifra" type="text" value="${escapeHtml(article?.sifra ?? '')}" />
+        <input id="f-sifra" name="sifra" type="text" value="${escapeHtml(sifraValue)}" />
         <label for="f-ean">EAN</label>
-        <input id="f-ean" name="ean" type="text" inputmode="numeric" value="${escapeHtml(article?.ean ?? eanPrefill ?? '')}" />
+        <input id="f-ean" name="ean" type="text" inputmode="numeric" value="${escapeHtml(eanValue)}" />
+        <label for="f-skupina">Skupina</label>
+        <input id="f-skupina" name="skupina" type="text" value="${escapeHtml(article?.skupina ?? '')}" />
         <label for="f-opomba">Opomba</label>
         <textarea id="f-opomba" name="opomba">${escapeHtml(article?.opomba ?? '')}</textarea>
         ${isNew ? `<label for="f-kolicina">Začetna količina</label>
         <input id="f-kolicina" name="kolicina" type="text" inputmode="numeric" value="0" />` : ''}
+        ${isNew && eanValue ? renderLinkBox(eanValue) : ''}
         <div class="stack" style="margin-top:16px">
-          <button type="submit" class="btn btn-primary">${isNew ? 'Dodaj' : 'Shrani'}</button>
+          ${ocrBtn}
+          <button type="submit" class="btn btn-primary">${isNew ? 'Dodaj nov artikel' : 'Shrani'}</button>
           <button type="button" class="btn btn-ghost" id="btn-cancel-edit">Prekliči</button>
         </div>
       </form>
+    </div>
+  </div>`
+}
+
+function renderLinkItems(): string {
+  const candidates = rankArticlesWithoutEan(data.articles, linkQuery)
+    .filter((row) => !linkQuery.trim() || row.score > 0 || articleMatches(linkQuery, row.article))
+    .slice(0, 20)
+  if (!candidates.length) {
+    return `<p class="empty">Ni artiklov brez EAN, ki bi ustrezali iskanju.</p>`
+  }
+  return candidates
+    .map((row) => {
+      const a = row.article
+      return `<button type="button" class="link-item" data-link-id="${escapeHtml(a.id)}">
+        <span><b>${escapeHtml(a.ime)}</b><br /><span class="meta">${escapeHtml(a.skupina || a.sifra || 'brez šifre')} · ${a.kolicina} kos</span></span>
+        <span class="link-action">Poveži</span>
+      </button>`
+    })
+    .join('')
+}
+
+function renderLinkBox(eanValue: string): string {
+  if (!data.articles.some((a) => !a.ean.trim())) return ''
+  return `<div class="link-box" id="link-box">
+        <h3>Poveži z obstoječim artiklom</h3>
+        <p class="hint">Če je to artikel, ki ga že imaš brez kode, ga izberi. Koda ${escapeHtml(eanValue)} se shrani nanj. Ali pa spodaj dodaš nov artikel.</p>
+        <input class="search" id="link-search" type="search" placeholder="Išči artikel brez EAN" value="${escapeHtml(linkQuery)}" />
+        <div class="link-list" id="link-list">${renderLinkItems()}</div>
+      </div>`
+}
+
+function renderImportPreview(result: ImportResult): string {
+  const dup = result.duplicates.length
+    ? `<p class="flash">Možno podvajanje (nisem združil): ${escapeHtml(result.duplicates.join(', '))}</p>`
+    : ''
+  const existing = data.articles.length
+    ? `<p class="hint">Na telefonu je že ${data.articles.length} artiklov.</p>
+        <button type="button" class="btn btn-primary" id="btn-import-add">Dodaj k obstoječim</button>
+        <button type="button" class="btn btn-danger" id="btn-import-replace">Zamenjaj seznam</button>`
+    : `<button type="button" class="btn btn-primary" id="btn-import-add">Uvozi ${result.items.length} artiklov</button>`
+  return `<div class="overlay">
+    <div class="sheet">
+      <h2>Uvoz</h2>
+      <p>Našel sem <b>${result.items.length}</b> artiklov, skupaj <b>${result.total}</b> kos${result.fileName ? ` v datoteki ${escapeHtml(result.fileName)}` : ''}.</p>
+      ${dup}
+      ${existing}
+      <div class="stack" style="margin-top:12px">
+        <button type="button" class="btn btn-ghost" id="btn-import-cancel">Prekliči</button>
+      </div>
     </div>
   </div>`
 }
@@ -235,32 +346,34 @@ function bindHome(): void {
     const list = document.querySelector('.list')
     if (list) list.innerHTML = visibleArticles().length
       ? visibleArticles()
-          .map((a) => {
-            return `<article class="card" data-id="${escapeHtml(a.id)}">
-              <div class="card-main" data-action="qty">
-                <h2>${escapeHtml(a.ime || '(brez imena)')}</h2>
-                <div class="meta">${escapeHtml(a.sifra || 'brez šifre')}${a.ean ? ` · EAN ${escapeHtml(a.ean)}` : ''}</div>
-                <div class="meta">spremenjeno ${escapeHtml(formatDateTime(a.updatedAt))}</div>
-                <button type="button" class="edit-link" data-action="edit">Uredi</button>
-              </div>
-              <button type="button" class="qty" data-action="qty" aria-label="Spremeni količino">
-                <b>${a.kolicina}</b><span>kos</span>
-              </button>
-            </article>`
-          })
+          .map((a) => renderArticleCard(a))
           .join('')
-      : `<p class="empty">${data.articles.length === 0 ? 'Ni artiklov. Skeniraj škatlo ali dodaj artikel ročno.' : 'Nisem našel artikla s tem iskanjem.'}</p>`
+      : `<p class="empty">${data.articles.length === 0 ? 'Ni artiklov. Naloži seznam žarnic, skeniraj škatlo ali dodaj artikel ročno.' : 'Nisem našel artikla s tem iskanjem.'}</p>`
     bindCards()
   })
   document.getElementById('btn-scan')?.addEventListener('click', () => {
     void openScan()
   })
   document.getElementById('btn-new')?.addEventListener('click', () => {
+    linkQuery = ''
+    linkQueryLocked = false
     screen = { kind: 'edit' }
     render()
   })
   document.getElementById('btn-export')?.addEventListener('click', () => {
     void downloadExport()
+  })
+  document.getElementById('btn-import')?.addEventListener('click', () => {
+    document.getElementById('file-import')?.click()
+  })
+  document.getElementById('file-import')?.addEventListener('change', (ev) => {
+    const input = ev.target as HTMLInputElement
+    const file = input.files?.[0]
+    input.value = ''
+    if (file) void importFromFile(file)
+  })
+  document.getElementById('btn-starter')?.addEventListener('click', () => {
+    loadStarterCatalog()
   })
   document.getElementById('btn-reset')?.addEventListener('click', () => {
     screen = { kind: 'confirm-reset' }
@@ -303,8 +416,8 @@ function bindScan(): void {
   })
   const video = document.getElementById('scan-video')
   if (!(video instanceof HTMLVideoElement)) return
-  void startScan(video, (code) => {
-    void onScanned(code)
+  void startScan(video, (result) => {
+    void onScanned(result)
   }).then((handle) => {
     scanHandle = handle
   }).catch((err: unknown) => {
@@ -313,17 +426,30 @@ function bindScan(): void {
   })
 }
 
-async function onScanned(code: string): Promise<void> {
+async function onScanned(result: ScanResult): Promise<void> {
   await stopScan()
-  const ean = normalizeEan(code)
-  const found = findByEan(data, ean)
+  const parsed = pickPreferredScan(result.hits)
+  const ean = normalizeEan(parsed.ean || (!parsed.sifra ? parsed.raw : ''))
+  const found =
+    (parsed.ean && findByEan(data, parsed.ean)) ||
+    (parsed.sifra && findBySifra(data, parsed.sifra)) ||
+    (ean && findByEan(data, ean))
   if (found) {
     banner = ''
     openQuantity(found.id)
     return
   }
-  screen = { kind: 'edit', eanPrefill: ean }
+  linkQuery = [parsed.sifra, parsed.raw, ean].filter(Boolean).join(' ')
+  linkQueryLocked = false
+  screen = {
+    kind: 'edit',
+    eanPrefill: ean,
+    sifraPrefill: parsed.sifra,
+    frame: result.frame,
+    ocrStatus: result.frame ? 'idle' : undefined,
+  }
   render()
+  if (result.frame) void runOcr()
 }
 
 function bindQuantity(): void {
@@ -371,8 +497,59 @@ function bindQuantity(): void {
   })
 }
 
+async function runOcr(): Promise<void> {
+  if (screen.kind !== 'edit' || !screen.frame) return
+  const frame = screen.frame
+  const previousSifra = screen.sifraPrefill ?? ''
+  screen = { ...screen, ocrStatus: 'running', ocrMessage: 'Berem napis…' }
+  render()
+  try {
+    const { recognizeLabel } = await import('./ocr.ts')
+    const text = await recognizeLabel(frame)
+    if (screen.kind !== 'edit' || screen.frame !== frame) return
+    const sug = suggestFromOcr(text)
+    const sifra = previousSifra || sug.sifra
+    const ime = sug.ime
+    let message = 'Nisem prebral šifre ali imena. Vpiši ročno ali poskusi znova.'
+    if (sug.sifra || sug.ime) {
+      message = 'Predlog z napisa. Preveri in popravi, če je treba, nato pritisni Dodaj.'
+    }
+    if (!linkQueryLocked) {
+      const bits = [sifra, ime, text].filter(Boolean).join(' ')
+      if (bits.trim()) linkQuery = bits
+    }
+    screen = {
+      ...screen,
+      sifraPrefill: sifra,
+      imePrefill: ime || screen.imePrefill,
+      ocrStatus: 'done',
+      ocrMessage: message,
+    }
+    render()
+  } catch {
+    if (screen.kind !== 'edit' || screen.frame !== frame) return
+    screen = {
+      ...screen,
+      ocrStatus: 'error',
+      ocrMessage: 'Branje napisa ni uspelo. Poskusi znova ali vpiši ročno.',
+    }
+    render()
+  }
+}
+
 function bindEdit(): void {
   document.getElementById('btn-cancel-edit')?.addEventListener('click', () => showHome())
+  document.getElementById('btn-ocr')?.addEventListener('click', () => {
+    void runOcr()
+  })
+  document.getElementById('link-search')?.addEventListener('input', (e) => {
+    linkQuery = (e.target as HTMLInputElement).value
+    linkQueryLocked = true
+    const list = document.getElementById('link-list')
+    if (list) list.innerHTML = renderLinkItems()
+    bindLinkItems()
+  })
+  bindLinkItems()
   document.getElementById('edit-form')?.addEventListener('submit', (ev) => {
     ev.preventDefault()
     const form = ev.target as HTMLFormElement
@@ -381,18 +558,20 @@ function bindEdit(): void {
     const sifra = String(fd.get('sifra') ?? '').trim()
     const ean = normalizeEan(String(fd.get('ean') ?? ''))
     const opomba = String(fd.get('opomba') ?? '').trim()
+    const skupina = String(fd.get('skupina') ?? '').trim() || inferGroupFromName(ime)
     if (!ime && !sifra && !ean) return
     if (screen.kind !== 'edit') return
     const existing = screen.article
     const startQty = parseCount(String(fd.get('kolicina') ?? '0')) ?? 0
     const article: Article = existing
-      ? { ...existing, ime, sifra, ean, opomba, updatedAt: nowIso() }
+      ? { ...existing, ime, sifra, ean, opomba, skupina, updatedAt: nowIso() }
       : {
           id: uid(),
           ime,
           sifra,
           ean,
           opomba,
+          skupina,
           kolicina: Math.max(0, startQty),
           updatedAt: nowIso(),
         }
@@ -429,6 +608,96 @@ async function downloadExport(): Promise<void> {
   a.click()
   URL.revokeObjectURL(url)
   showHome(`Datoteka ${exportFileName()} je pripravljena.`)
+}
+
+function bindLinkItems(): void {
+  document.querySelectorAll<HTMLButtonElement>('[data-link-id]').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.preventDefault()
+      ev.stopPropagation()
+      if (screen.kind !== 'edit') return
+      const id = btn.dataset.linkId
+      if (!id) return
+      const article = findById(data, id)
+      if (!article) return
+      const ean = normalizeEan(screen.eanPrefill ?? (document.getElementById('f-ean') as HTMLInputElement | null)?.value ?? '')
+      const sifra = (screen.sifraPrefill || String((document.getElementById('f-sifra') as HTMLInputElement | null)?.value ?? '').trim())
+      const next: Article = {
+        ...article,
+        ean: ean || article.ean,
+        sifra: article.sifra || sifra,
+        updatedAt: nowIso(),
+      }
+      data = upsertArticle(data, next)
+      persist()
+      openQuantity(next.id)
+    })
+  })
+}
+
+function itemsToArticles(items: ImportedItem[], now: string): Article[] {
+  return items.map((item) => ({
+    id: uid(),
+    ime: item.ime,
+    sifra: item.sifra,
+    ean: item.ean,
+    kolicina: item.kolicina,
+    opomba: item.opomba,
+    skupina: item.skupina,
+    updatedAt: now,
+  }))
+}
+
+function applyImport(result: ImportResult, mode: 'replace' | 'append'): void {
+  const now = nowIso()
+  const incoming = itemsToArticles(result.items, now)
+  data = {
+    ...data,
+    articles: mode === 'replace' ? incoming : [...incoming, ...data.articles],
+    importMeta: { fileName: result.fileName || STARTER_FILE_NAME, importedAt: now },
+  }
+  persist()
+  const dup = result.duplicates.length ? ` Možno podvajanje ostaja ločeno: ${result.duplicates.join(', ')}.` : ''
+  showHome(`Uvoženih ${incoming.length} artiklov, skupaj ${result.total} kos.${dup}`)
+}
+
+function loadStarterCatalog(): void {
+  const result: ImportResult = {
+    items: STARTER_ITEMS,
+    total: STARTER_ITEMS.reduce((sum, item) => sum + item.kolicina, 0),
+    duplicates: ['NL-T5 13W/840/65'],
+    fileName: STARTER_FILE_NAME,
+  }
+  if (data.articles.length === 0) {
+    applyImport(result, 'replace')
+    return
+  }
+  screen = { kind: 'import-preview', result }
+  render()
+}
+
+async function importFromFile(file: File): Promise<void> {
+  try {
+    const { parseSpreadsheetBuffer } = await import('./importSpreadsheet.ts')
+    const buffer = new Uint8Array(await file.arrayBuffer())
+    const result = parseSpreadsheetBuffer(buffer, file.name)
+    if (!result.items.length) {
+      showHome('V datoteki nisem našel artiklov. Preveri, da so v stolpcih ime in količina.')
+      return
+    }
+    screen = { kind: 'import-preview', result }
+    render()
+  } catch {
+    showHome('Datoteke nisem mogel prebrati. Poskusi xlsx, xls, xlt, ods ali csv.')
+  }
+}
+
+function bindImportPreview(): void {
+  if (screen.kind !== 'import-preview') return
+  const result = screen.result
+  document.getElementById('btn-import-cancel')?.addEventListener('click', () => showHome())
+  document.getElementById('btn-import-add')?.addEventListener('click', () => applyImport(result, 'append'))
+  document.getElementById('btn-import-replace')?.addEventListener('click', () => applyImport(result, 'replace'))
 }
 
 registerServiceWorker()

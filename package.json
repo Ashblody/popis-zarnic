@@ -1,20 +1,24 @@
 {
   "name": "popis-zarnic",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
-  "description": "Popis skladišča žarnic — PWA za telefon (EAN, količina, izvoz Excel)",
+  "description": "Popis skladi\u0161\u010da \u017earnic \u2014 PWA za telefon (EAN/QR, koli\u010dina, OCR napisa, izvoz Excel)",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "smoke": "npm run build && node scripts/smoke.mjs"
+    "smoke": "npm run build && node scripts/smoke.mjs",
+    "copy-tess": "node scripts/copy-tess.mjs",
+    "prebuild": "node scripts/copy-tess.mjs",
+    "predev": "node scripts/copy-tess.mjs"
   },
   "dependencies": {
     "@zxing/browser": "^0.1.5",
     "@zxing/library": "^0.21.3",
+    "tesseract.js": "^5.1.1",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

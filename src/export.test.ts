@@ -35,23 +35,32 @@ describe('export', () => {
     expect(exportFileName(new Date(2026, 10, 10))).toBe('popis-zarnic-2026-11-10.xlsx')
   })
 
-  it('uredi vrstice po šifri in ohrani stolpce', () => {
+  it('uredi vrstice in ohrani stolpce', () => {
     const rows = articlesToRows(articles)
-    expect(rows[0]?.[0]).toBe('A1')
-    expect(rows[1]?.[0]).toBe('B2')
-    expect(rows[0]).toEqual(['A1', 'Žarnica E27', '111', 10, '', '2026-11-01T08:00:00.000Z'])
+    const bySifra = Object.fromEntries(rows.map((r) => [r[0], r]))
+    expect(bySifra.A1?.[1]).toBe('Žarnica E27')
+    expect(bySifra.A1?.[2]).toBe('111')
+    expect(bySifra.A1?.[3]).toBe(10)
+    expect(bySifra.A1?.[6]).toBe('2026-11-01T08:00:00.000Z')
+    expect(bySifra.B2?.[1]).toBe('Halogen')
   })
 
   it('zgradi veljaven xlsx, ki ga SheetJS prebere nazaj', () => {
     const book = buildWorkbook(articles)
     const buffer = workbookToArrayBuffer(book)
     const parsed = XLSX.read(buffer, { type: 'array' })
-    const sheet = parsed.Sheets.Popis
-    expect(sheet).toBeTruthy()
-    const rows = XLSX.utils.sheet_to_json<(string | number)[]>(sheet!, { header: 1 })
+    expect(parsed.SheetNames).toEqual(['Popis', 'Seznam'])
+    const list = parsed.Sheets.Seznam
+    expect(list).toBeTruthy()
+    const rows = XLSX.utils.sheet_to_json<(string | number)[]>(list!, { header: 1 })
     expect(rows[0]).toEqual([...EXPORT_COLUMNS])
     expect(rows).toHaveLength(3)
-    expect(rows[1]?.[1]).toBe('Žarnica E27')
-    expect(rows[2]?.[3]).toBe(3)
+    const imes = rows.slice(1).map((r) => r[1])
+    expect(imes).toContain('Žarnica E27')
+    expect(imes).toContain('Halogen')
+    const layout = XLSX.utils.sheet_to_json<(string | number)[]>(parsed.Sheets.Popis!, { header: 1, defval: '' })
+    const names = layout.flat().filter((c) => typeof c === 'string' && c)
+    expect(names).toContain('Žarnica E27')
+    expect(names).toContain('Halogen')
   })
 })

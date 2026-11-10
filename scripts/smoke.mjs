@@ -77,6 +77,8 @@ await client.send('Page.setDownloadBehavior', {
 await page.goto(origin, { waitUntil: 'networkidle0' })
 const title = await page.title()
 if (!title.includes('Popis žarnic')) throw new Error(`Unexpected title: ${title}`)
+const homeText = await page.$eval('#app', (el) => el.innerText)
+if (!homeText.includes('v1.1.0')) throw new Error(`Manjka različica v1.1.0: ${homeText.slice(0, 200)}`)
 
 await page.click('#btn-new')
 await page.waitForSelector('#edit-form')
@@ -116,7 +118,7 @@ while (Date.now() < deadline) {
 if (!downloaded) throw new Error('xlsx se ni prenesel')
 
 await page.click('#btn-scan')
-await page.waitForSelector('#scan-overlay, #btn-cancel-scan, .flash', { timeout: 8000 })
+await page.waitForSelector('#scan-overlay, #btn-cancel-scan', { timeout: 8000 })
 const crashed = errors.length > 0
 const scanVisible = await page.$('#btn-cancel-scan')
 if (!scanVisible) throw new Error('Gumb za preklic skeniranja se ni prikazal')

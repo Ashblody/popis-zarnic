@@ -13,3 +13,6 @@ playwright-report
 test-results
 smoke-output
 smoke-output
+
+# Tesseract assets (copied by scripts/copy-tess.mjs at build)
+public/tess

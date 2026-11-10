@@ -8,9 +8,9 @@ export function normalizeSearch(value: string): string {
     .trim()
 }
 
-export function articleMatches(query: string, article: { sifra: string; ime: string; ean: string }): boolean {
+export function articleMatches(query: string, article: { sifra: string; ime: string; ean: string; skupina?: string }): boolean {
   const q = normalizeSearch(query)
   if (!q) return true
-  const hay = normalizeSearch(`${article.sifra} ${article.ime} ${article.ean}`)
+  const hay = normalizeSearch(`${article.sifra} ${article.ime} ${article.ean} ${article.skupina ?? ''}`)
   return hay.includes(q)
 }

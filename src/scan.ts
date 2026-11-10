@@ -1,9 +1,23 @@
+import {
+  NATIVE_BARCODE_FORMATS,
+  mapNativeFormat,
+  type ScanFormat,
+  type ScanHit,
+} from './scanParse.ts'
+
+export type { ScanFormat, ScanHit }
+
+export type ScanResult = {
+  hits: ScanHit[]
+  frame?: string
+}
+
 export type ScanHandle = {
   stop: () => Promise<void>
 }
 
 type BarcodeDetectorLike = {
-  detect: (source: ImageBitmapSource) => Promise<Array<{ rawValue: string }>>
+  detect: (source: ImageBitmapSource) => Promise<Array<{ rawValue: string; format?: string }>>
 }
 
 type BarcodeDetectorCtor = {
@@ -20,11 +34,102 @@ export function canUseNativeDetector(): boolean {
   return typeof getBarcodeDetector() === 'function'
 }
 
-async function startNativeScan(video: HTMLVideoElement, onCode: (text: string) => void): Promise<ScanHandle> {
+export function captureFrame(video: HTMLVideoElement): string | undefined {
+  if (!video.videoWidth || !video.videoHeight) return undefined
+  const canvas = document.createElement('canvas')
+  canvas.width = video.videoWidth
+  canvas.height = video.videoHeight
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return undefined
+  ctx.drawImage(video, 0, 0)
+  try {
+    return canvas.toDataURL('image/jpeg', 0.85)
+  } catch {
+    return undefined
+  }
+}
+
+function uniqueHits(hits: ScanHit[]): ScanHit[] {
+  const seen = new Set<string>()
+  const out: ScanHit[] = []
+  for (const hit of hits) {
+    const text = hit.text.trim()
+    if (!text) continue
+    const key = `${hit.format}:${text}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ text, format: hit.format })
+  }
+  return out
+}
+
+function mapZxingFormat(format: { toString: () => string } | number | string): ScanFormat {
+  const raw = String(format)
+  const name = raw
+  const table: Record<string, ScanFormat> = {
+    '8': 'ean_8',
+    '7': 'ean_13',
+    '11': 'qr_code',
+    '6': 'data_matrix',
+    '1': 'code_128',
+    '2': 'code_39',
+    '12': 'upc_a',
+    '13': 'upc_e',
+    EAN_8: 'ean_8',
+    EAN_13: 'ean_13',
+    QR_CODE: 'qr_code',
+    DATA_MATRIX: 'data_matrix',
+    CODE_128: 'code_128',
+    CODE_39: 'code_39',
+    UPC_A: 'upc_a',
+    UPC_E: 'upc_e',
+  }
+  return table[name] ?? table[name.toUpperCase()] ?? mapNativeFormat(name)
+}
+
+async function decodeAllFromCanvas(canvas: HTMLCanvasElement): Promise<ScanHit[]> {
+  const [{ BrowserMultiFormatReader }, { BarcodeFormat, DecodeHintType }] = await Promise.all([
+    import('@zxing/browser'),
+    import('@zxing/library'),
+  ])
+  const groups = [
+    [BarcodeFormat.EAN_13, BarcodeFormat.EAN_8, BarcodeFormat.UPC_A, BarcodeFormat.UPC_E, BarcodeFormat.CODE_128, BarcodeFormat.CODE_39],
+    [BarcodeFormat.QR_CODE],
+    [BarcodeFormat.DATA_MATRIX],
+  ]
+  const hits: ScanHit[] = []
+  for (const formats of groups) {
+    const hints = new Map()
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, formats)
+    hints.set(DecodeHintType.TRY_HARDER, true)
+    const reader = new BrowserMultiFormatReader(hints)
+    try {
+      const result = await reader.decodeFromCanvas(canvas)
+      const text = result.getText().trim()
+      if (text) hits.push({ text, format: mapZxingFormat(result.getBarcodeFormat()) })
+    } catch {
+      /* ta skupina na sliki ni bila */
+    }
+  }
+  return uniqueHits(hits)
+}
+
+function canvasFromVideo(video: HTMLVideoElement): HTMLCanvasElement | undefined {
+  if (!video.videoWidth || !video.videoHeight) return undefined
+  const canvas = document.createElement('canvas')
+  canvas.width = video.videoWidth
+  canvas.height = video.videoHeight
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return undefined
+  ctx.drawImage(video, 0, 0)
+  return canvas
+}
+
+async function startNativeScan(video: HTMLVideoElement, onResult: (result: ScanResult) => void): Promise<ScanHandle> {
   const Ctor = getBarcodeDetector()
   if (!Ctor) throw new Error('BarcodeDetector ni na voljo')
   const detector = new Ctor({
-    formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'qr_code'],
+    formats: [...NATIVE_BARCODE_FORMATS],
   })
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: false,
@@ -40,10 +145,16 @@ async function startNativeScan(video: HTMLVideoElement, onCode: (text: string) =
     try {
       if (video.readyState >= 2) {
         const codes = await detector.detect(video)
-        const value = codes[0]?.rawValue?.trim()
-        if (value) {
+        const hits = uniqueHits(
+          codes.map((c) => ({
+            text: (c.rawValue ?? '').trim(),
+            format: mapNativeFormat(c.format ?? ''),
+          })),
+        )
+        if (hits.length) {
+          const frame = captureFrame(video)
           await stop()
-          onCode(value)
+          onResult({ hits, frame })
           return
         }
       }
@@ -69,7 +180,7 @@ async function startNativeScan(video: HTMLVideoElement, onCode: (text: string) =
   return { stop }
 }
 
-async function startZxingScan(video: HTMLVideoElement, onCode: (text: string) => void): Promise<ScanHandle> {
+async function startZxingScan(video: HTMLVideoElement, onResult: (result: ScanResult) => void): Promise<ScanHandle> {
   const [{ BrowserMultiFormatReader }, { BarcodeFormat, DecodeHintType }] = await Promise.all([
     import('@zxing/browser'),
     import('@zxing/library'),
@@ -83,7 +194,9 @@ async function startZxingScan(video: HTMLVideoElement, onCode: (text: string) =>
     BarcodeFormat.CODE_128,
     BarcodeFormat.CODE_39,
     BarcodeFormat.QR_CODE,
+    BarcodeFormat.DATA_MATRIX,
   ])
+  hints.set(DecodeHintType.TRY_HARDER, true)
   const reader = new BrowserMultiFormatReader(hints)
   let settled = false
   const controls = await reader.decodeFromConstraints(
@@ -94,8 +207,28 @@ async function startZxingScan(video: HTMLVideoElement, onCode: (text: string) =>
       const text = result.getText().trim()
       if (!text) return
       settled = true
-      ctrl.stop()
-      onCode(text)
+      const first: ScanHit = { text, format: mapZxingFormat(result.getBarcodeFormat()) }
+      const canvas = canvasFromVideo(video)
+      const frame = canvas
+        ? (() => {
+            try {
+              return canvas.toDataURL('image/jpeg', 0.85)
+            } catch {
+              return undefined
+            }
+          })()
+        : captureFrame(video)
+      const finish = (hits: ScanHit[]) => {
+        ctrl.stop()
+        onResult({ hits: uniqueHits(hits), frame })
+      }
+      if (canvas) {
+        void decodeAllFromCanvas(canvas)
+          .then((extra) => finish([first, ...extra]))
+          .catch(() => finish([first]))
+      } else {
+        finish([first])
+      }
     },
   )
 
@@ -112,19 +245,19 @@ async function startZxingScan(video: HTMLVideoElement, onCode: (text: string) =>
   }
 }
 
-export async function startScan(video: HTMLVideoElement, onCode: (text: string) => void): Promise<ScanHandle> {
+export async function startScan(video: HTMLVideoElement, onResult: (result: ScanResult) => void): Promise<ScanHandle> {
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new Error('Ta brskalnik nima dostopa do kamere.')
   }
   if (canUseNativeDetector()) {
     try {
-      return await startNativeScan(video, onCode)
+      return await startNativeScan(video, onResult)
     } catch (err) {
       if (isPermissionError(err)) throw err
       /* Native detector may exist but fail; fall through to ZXing. */
     }
   }
-  return startZxingScan(video, onCode)
+  return startZxingScan(video, onResult)
 }
 
 export function isPermissionError(err: unknown): boolean {
