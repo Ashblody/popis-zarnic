@@ -1,5 +1,5 @@
 /* Popis žarnic — bump CACHE after each release so phones pick up the new app. */
-const CACHE = 'popis-zarnic-v1.2.1'
+const CACHE = 'popis-zarnic-v1.3.0'
 
 self.addEventListener('install', (event) => {
   self.skipWaiting()

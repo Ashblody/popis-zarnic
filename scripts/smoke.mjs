@@ -78,7 +78,7 @@ await page.goto(origin, { waitUntil: 'networkidle0' })
 const title = await page.title()
 if (!title.includes('Popis žarnic')) throw new Error(`Unexpected title: ${title}`)
 const homeText = await page.$eval('#app', (el) => el.innerText)
-if (!homeText.includes('v1.2.1')) throw new Error(`Manjka različica v1.2.1: ${homeText.slice(0, 200)}`)
+if (!homeText.includes('v1.3.0')) throw new Error(`Manjka različica v1.3.0: ${homeText.slice(0, 200)}`)
 if (!(await page.$('#btn-sync'))) throw new Error('Manjka gumb Skupna zaloga')
 
 await page.$eval('#btn-sync', (el) => {
@@ -154,28 +154,24 @@ await page.$eval('#btn-scan', (el) => {
     el.click()
   }
 })
-await page.waitForFunction(
-  () =>
-    document.querySelector('#scan-overlay') ||
-    document.querySelector('#edit-form') ||
-    document.querySelector('#btn-save-qty'),
+const scanState = await page.waitForFunction(
+  () => {
+    if (document.querySelector('#btn-scan-text')) return 'text'
+    if (document.querySelector('#edit-form')) return 'edit'
+    if (document.querySelector('#btn-save-qty')) return 'qty'
+    return false
+  },
   { timeout: 8000 },
 )
-if (errors.length) throw new Error(`Skeniranje je podrlo stran: ${errors.join('; ')}`)
-if (await page.$('#btn-cancel-scan')) {
-  await page.$eval('#btn-cancel-scan', (el) => {
-    if (el instanceof HTMLElement) el.click()
-  })
-  await page.waitForFunction(() => !document.querySelector('#scan-overlay'))
-} else if (await page.$('#btn-cancel-edit')) {
-  await page.$eval('#btn-cancel-edit', (el) => {
-    if (el instanceof HTMLElement) el.click()
-  })
-} else if (await page.$('#btn-cancel-qty')) {
-  await page.$eval('#btn-cancel-qty', (el) => {
-    if (el instanceof HTMLElement) el.click()
-  })
+if ((await scanState.jsonValue()) === 'text') {
+  const label = await page.$eval('#btn-scan-text', (el) => el.textContent || '')
+  if (!label.includes('Samo tekst')) throw new Error(`Gumb Samo tekst: ${label}`)
 }
+if (errors.length) throw new Error(`Skeniranje je podrlo stran: ${errors.join('; ')}`)
+await page.evaluate(() => {
+  const btn = document.querySelector('#btn-cancel-scan, #btn-cancel-edit, #btn-cancel-qty')
+  if (btn instanceof HTMLElement) btn.click()
+})
 await page.waitForFunction(() => !document.querySelector('#scan-overlay'))
 
 await page.screenshot({ path: path.join(outDir, 'home-390.png'), fullPage: true })

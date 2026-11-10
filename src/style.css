@@ -358,3 +358,21 @@ details.advanced summary {
   color: var(--muted);
   padding: 8px 0;
 }
+
+.scan-wrap-text .scan-crop {
+  position: absolute;
+  left: 8%;
+  top: 26%;
+  width: 84%;
+  height: 40%;
+  border: 3px solid var(--accent);
+  border-radius: 12px;
+  box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+.scan-match {
+  text-align: left;
+  line-height: 1.3;
+  white-space: normal;
+}

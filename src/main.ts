@@ -1,10 +1,12 @@
 import './style.css'
 import { articleMatches } from './search.ts'
 import { applyQuantity, adjustEntered, parseCount, type QuantityMode } from './quantity.ts'
-import { scanErrorMessage, startScan, type ScanHandle, type ScanResult } from './scan.ts'
+import { scanErrorMessage, startCameraPreview, startScan, type ScanHandle, type ScanResult } from './scan.ts'
 import { pickPreferredScan } from './scanParse.ts'
 import { suggestFromOcr } from './ocrSuggest.ts'
-import { rankArticlesWithoutEan } from './linkMatch.ts'
+import { rankArticlesWithoutEan, topMatches } from './linkMatch.ts'
+import { captureViewCrop, cropDataUrl, TEXT_CROP } from './ocrCrop.ts'
+import { formatOcrLabel } from './ocrNormalize.ts'
 import type { ImportResult, ImportedItem } from './importSpreadsheet.ts'
 import { STARTER_FILE_NAME, STARTER_ITEMS } from './starterCatalog.ts'
 import { inferGroupFromName } from './group.ts'
@@ -48,13 +50,20 @@ import {
   syncPush,
 } from './syncClient.ts'
 
-const APP_VERSION = '1.2.1'
+const APP_VERSION = '1.3.0'
 
 type OcrStatus = 'idle' | 'running' | 'done' | 'error'
 
 type Screen =
   | { kind: 'home' }
-  | { kind: 'scan'; error?: string }
+  | {
+      kind: 'scan'
+      mode: 'code' | 'text'
+      error?: string
+      ocrStatus?: OcrStatus
+      ocrMessage?: string
+      ocrText?: string
+    }
   | { kind: 'quantity'; articleId: string; entered: string; mode: QuantityMode }
   | {
       kind: 'edit'
@@ -250,7 +259,7 @@ function render(): void {
     return
   }
   if (screen.kind === 'scan') {
-    app.innerHTML = renderHome() + renderScan(screen.error)
+    app.innerHTML = renderHome() + renderScan(screen)
     bindHome()
     bindScan()
     return
@@ -358,18 +367,54 @@ function renderHome(): string {
     <div class="list">${cards}</div>`
 }
 
-function renderScan(error?: string): string {
+function renderScan(state: Extract<Screen, { kind: 'scan' }>): string {
+  const textMode = state.mode === 'text'
+  const ocrBusy = state.ocrStatus === 'running'
+  const matches =
+    textMode && state.ocrText
+      ? topMatches(liveArticles(), formatOcrLabel(state.ocrText) || state.ocrText, 5)
+      : []
+  const matchButtons = matches
+    .map(
+      (row) => `<button type="button" class="btn btn-primary scan-match" data-text-id="${escapeHtml(row.article.id)}">
+        ${escapeHtml(row.article.ime)}${row.article.skupina ? ` · ${escapeHtml(row.article.skupina)}` : ''} · ${row.article.kolicina} kos
+      </button>`,
+    )
+    .join('')
+  const ocrNote = state.ocrMessage
+    ? `<p class="flash ${state.ocrStatus === 'error' ? '' : 'ok'}">${escapeHtml(state.ocrMessage)}</p>`
+    : ''
+  const newFromOcr =
+    textMode && state.ocrStatus === 'done'
+      ? `<button type="button" class="btn" id="btn-text-new">Nič od tega / nov artikel</button>`
+      : ''
+  const actions = textMode
+    ? `<button type="button" class="btn btn-primary" id="btn-read-text" ${ocrBusy ? 'disabled' : ''}>${
+        ocrBusy ? 'Berem napis…' : 'Preberi'
+      }</button>
+        ${matchButtons}
+        ${newFromOcr}
+        <button type="button" class="btn" id="btn-scan-code">Nazaj na kodo</button>
+        <button type="button" class="btn btn-ghost" id="btn-cancel-scan">Prekliči</button>`
+    : `<button type="button" class="btn btn-primary" id="btn-scan-text">Samo tekst</button>
+        <button type="button" class="btn" id="btn-cancel-scan">Prekliči</button>`
   return `<div class="overlay" id="scan-overlay">
     <div class="sheet">
-      <h2>Skeniraj kodo</h2>
-      <p class="hint">Usmeri kamero na črtno kodo ali QR na škatli.</p>
-      <div class="scan-wrap">
+      <h2>${textMode ? 'Samo tekst' : 'Skeniraj kodo'}</h2>
+      <p class="hint">${
+        textMode
+          ? 'Približaj na 10-20 cm, dobra svetloba. Napis naj bo v rumenem okvirju, nato pritisni Preberi.'
+          : 'Usmeri kamero na črtno kodo ali QR na škatli. Če kode ni, pritisni Samo tekst.'
+      }</p>
+      <div class="scan-wrap${textMode ? ' scan-wrap-text' : ''}">
         <video id="scan-video" playsinline muted autoplay></video>
-        <div class="scan-hint">Drži kodo v sredini slike</div>
+        ${textMode ? '<div class="scan-crop" aria-hidden="true"></div>' : ''}
+        <div class="scan-hint">${textMode ? 'Napis v okvirju' : 'Drži kodo v sredini slike'}</div>
       </div>
-      ${error ? `<p class="flash">${escapeHtml(error)}</p>` : ''}
+      ${state.error ? `<p class="flash">${escapeHtml(state.error)}</p>` : ''}
+      ${ocrNote}
       <div class="stack" style="margin-top:12px">
-        <button type="button" class="btn" id="btn-cancel-scan">Prekliči</button>
+        ${actions}
       </div>
     </div>
   </div>`
@@ -440,7 +485,7 @@ function renderEdit(state: Extract<Screen, { kind: 'edit' }>): string {
         <textarea id="f-opomba" name="opomba">${escapeHtml(article?.opomba ?? '')}</textarea>
         ${isNew ? `<label for="f-kolicina">Začetna količina</label>
         <input id="f-kolicina" name="kolicina" type="text" inputmode="numeric" value="0" />` : ''}
-        ${isNew && eanValue ? renderLinkBox(eanValue) : ''}
+        ${isNew && (eanValue || sifraValue || linkQuery) ? renderLinkBox(eanValue) : ''}
         <div class="stack" style="margin-top:16px">
           ${ocrBtn}
           <button type="submit" class="btn btn-primary">${isNew ? 'Dodaj nov artikel' : 'Shrani'}</button>
@@ -708,26 +753,66 @@ function bindCards(): void {
   })
 }
 
-async function openScan(): Promise<void> {
+async function openScan(mode: 'code' | 'text' = 'code'): Promise<void> {
   await stopScan()
-  screen = { kind: 'scan' }
+  screen = { kind: 'scan', mode }
   render()
+}
+
+async function startScanForScreen(): Promise<void> {
+  const video = document.getElementById('scan-video')
+  if (!(video instanceof HTMLVideoElement) || screen.kind !== 'scan') return
+  const mode = screen.mode
+  try {
+    const handle = mode === 'text' ? await startCameraPreview(video) : await startScan(video, (result) => {
+      void onScanned(result)
+    })
+    if (screen.kind === 'scan' && screen.mode === mode) scanHandle = handle
+    else await handle.stop()
+  } catch (err: unknown) {
+    if (screen.kind !== 'scan' || screen.mode !== mode) return
+    screen = { ...screen, error: scanErrorMessage(err) }
+    render()
+  }
 }
 
 function bindScan(): void {
   document.getElementById('btn-cancel-scan')?.addEventListener('click', () => {
     void stopScan().then(() => showHome())
   })
-  const video = document.getElementById('scan-video')
-  if (!(video instanceof HTMLVideoElement)) return
-  void startScan(video, (result) => {
-    void onScanned(result)
-  }).then((handle) => {
-    scanHandle = handle
-  }).catch((err: unknown) => {
-    screen = { kind: 'scan', error: scanErrorMessage(err) }
-    render()
+  document.getElementById('btn-scan-text')?.addEventListener('click', () => {
+    void openScan('text')
   })
+  document.getElementById('btn-scan-code')?.addEventListener('click', () => {
+    void openScan('code')
+  })
+  document.getElementById('btn-read-text')?.addEventListener('click', () => {
+    void runTextOcr()
+  })
+  document.getElementById('btn-text-new')?.addEventListener('click', () => {
+    if (screen.kind !== 'scan') return
+    const raw = screen.ocrText || ''
+    const label = formatOcrLabel(raw)
+    const sug = suggestFromOcr(raw)
+    void stopScan().then(() => {
+      linkQuery = label
+      linkQueryLocked = false
+      screen = {
+        kind: 'edit',
+        imePrefill: sug.ime || label,
+        sifraPrefill: sug.sifra,
+      }
+      render()
+    })
+  })
+  document.querySelectorAll<HTMLButtonElement>('[data-text-id]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.textId
+      if (!id) return
+      void stopScan().then(() => openQuantity(id))
+    })
+  })
+  void startScanForScreen()
 }
 
 async function onScanned(result: ScanResult): Promise<void> {
@@ -811,17 +896,19 @@ async function runOcr(): Promise<void> {
   render()
   try {
     const { recognizeLabel } = await import('./ocr.ts')
-    const text = await recognizeLabel(frame)
+    const cropped = await cropDataUrl(frame)
+    const text = await recognizeLabel(cropped || frame)
     if (screen.kind !== 'edit' || screen.frame !== frame) return
     const sug = suggestFromOcr(text)
     const sifra = previousSifra || sug.sifra
     const ime = sug.ime
+    const label = formatOcrLabel(text)
     let message = 'Nisem prebral šifre ali imena. Vpiši ročno ali poskusi znova.'
-    if (sug.sifra || sug.ime) {
-      message = 'Predlog z napisa. Preveri in popravi, če je treba, nato pritisni Dodaj.'
+    if (sug.sifra || sug.ime || label) {
+      message = 'Predlog z napisa. Predloge povezave sem razvrstil po napisu — potrdi, preden shraniš.'
     }
     if (!linkQueryLocked) {
-      const bits = [sifra, ime, text].filter(Boolean).join(' ')
+      const bits = [sifra, ime, label || text].filter(Boolean).join(' ')
       if (bits.trim()) linkQuery = bits
     }
     screen = {
@@ -839,6 +926,42 @@ async function runOcr(): Promise<void> {
       ocrStatus: 'error',
       ocrMessage: 'Branje napisa ni uspelo. Poskusi znova ali vpiši ročno.',
     }
+    render()
+  }
+}
+
+async function runTextOcr(): Promise<void> {
+  if (screen.kind !== 'scan' || screen.mode !== 'text') return
+  const video = document.getElementById('scan-video')
+  if (!(video instanceof HTMLVideoElement)) return
+  const frame = captureViewCrop(video, TEXT_CROP)
+  if (!frame) {
+    screen = { ...screen, ocrStatus: 'error', ocrMessage: 'Slike nisem ujel. Poskusi znova.' }
+    render()
+    return
+  }
+  screen = { ...screen, ocrStatus: 'running', ocrMessage: 'Berem napis…', error: undefined }
+  render()
+  try {
+    const { recognizeLabel } = await import('./ocr.ts')
+    const text = await recognizeLabel(frame)
+    if (screen.kind !== 'scan' || screen.mode !== 'text') return
+    const label = formatOcrLabel(text)
+    const matches = topMatches(liveArticles(), label || text, 5)
+    screen = {
+      ...screen,
+      ocrStatus: 'done',
+      ocrText: text,
+      ocrMessage: text
+        ? matches.length
+          ? `Prebral sem: ${label || text}. Izberi artikel ali dodaj novega.`
+          : `Prebral sem: ${label || text}. Nisem našel podobnega artikla.`
+        : 'Nisem prebral napisa. Približaj na 10-20 cm in poskusi znova.',
+    }
+    render()
+  } catch {
+    if (screen.kind !== 'scan' || screen.mode !== 'text') return
+    screen = { ...screen, ocrStatus: 'error', ocrMessage: 'Branje napisa ni uspelo. Poskusi znova ali vpiši ročno.' }
     render()
   }
 }

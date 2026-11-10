@@ -245,6 +245,28 @@ async function startZxingScan(video: HTMLVideoElement, onResult: (result: ScanRe
   }
 }
 
+
+export async function startCameraPreview(video: HTMLVideoElement): Promise<ScanHandle> {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error('Ta brskalnik nima dostopa do kamere.')
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: { facingMode: { ideal: 'environment' } },
+  })
+  video.srcObject = stream
+  await video.play()
+  let stopped = false
+  return {
+    stop: async () => {
+      if (stopped) return
+      stopped = true
+      stream.getTracks().forEach((track) => track.stop())
+      video.srcObject = null
+    },
+  }
+}
+
 export async function startScan(video: HTMLVideoElement, onResult: (result: ScanResult) => void): Promise<ScanHandle> {
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new Error('Ta brskalnik nima dostopa do kamere.')

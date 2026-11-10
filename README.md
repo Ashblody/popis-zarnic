@@ -9,7 +9,7 @@ Preprosta aplikacija za telefon, s katero Hebo in žena popisujeta zalogo žarni
 1. Na telefonu odpri povezavo v Chromu (Android) ali Safariju (iPhone).
 2. Dodaj jo na začetni zaslon: v Chromu meni → **Dodaj na začetni zaslon**; v Safariju delilnik → **Dodaj na začetni zaslon**.
 3. Ko prvič pritisneš **Skeniraj**, dovoli dostop do kamere.
-4. Pritisni **Skeniraj** in usmeri kamero na črtno kodo ali QR na škatli. Če artikla še ni, se odpre **Nov artikel** z že vpisano kodo. Pri novem artiklu lahko pritisneš **Preberi napis**, da predlaga šifro in ime z nalepke — pred shranitvijo preveri predlog.
+4. Pritisni **Skeniraj** in usmeri kamero na črtno kodo ali QR na škatli. Če je koda znana, se takoj odpre količina. Če kode še nimaš na artiklu, aplikacija prebere tudi napis in predlaga obstoječe artikle (najbolj podoben je prvi) — povezavo moraš potrditi, nikoli je ne naredi sama. Če na škatli ni kode, pritisni **Samo tekst**, napis drži v rumenem okvirju (približaj na 10-20 cm, dobra svetloba) in pritisni **Preberi**. Izberi eden od predlogov ali **Nič od tega / nov artikel**.
 5. Vpiši količino (veliki gumbi +1 / +10 ali tipkovnica) in pritisni **Shrani**.
 6. Artikel lahko poiščeš po imenu ali šifri, ali ga dodaš ročno z **Nov artikel**.
 7. Na praznem telefonu pritisni **Naloži seznam žarnic (81)** za inventuro iz 9. 11. 2026 (2643 kos). Isti seznam lahko uvoziš tudi z **Uvozi Excel** (xlsx, xls, xlt, ods ali csv). Če se isto ime pojavi dvakrat, aplikacija obeh ne združi.
