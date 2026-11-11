@@ -198,7 +198,8 @@ function queueMutation(prev: Article | undefined, next: Article, flush = true): 
     pending: enqueueOp(syncConfig.pending, opFromUpsert(prev, article, article.updatedBy || deviceLabel())),
   }
   saveSyncConfig(syncConfig)
-  if (flush) void flushSync()
+  // počakaj, da se zaslon vrne na seznam (flushSync pošilja samo z glavnega zaslona)
+  if (flush) setTimeout(() => void flushSync(), 0)
 }
 
 function consumeSetupHash(): boolean {
@@ -311,6 +312,7 @@ function showHome(message = ''): void {
   banner = message
   screen = { kind: 'home' }
   render()
+  if (syncConfig?.pending.length) void flushSync()
 }
 
 function openQuantity(articleId: string): void {
