@@ -38,6 +38,8 @@ export type SyncConfig = {
   deviceName: string
   lastSyncAt?: string
   pending: SyncOp[]
+  /** Uporabnik je izklopil skupno zalogo (ostane samo na tem telefonu). */
+  localOnly?: boolean
 }
 
 export const SYNC_SETTINGS_KEY = 'popis-zarnic-sync-v1'
@@ -51,8 +53,25 @@ export function effectiveSyncUrl(config: Partial<SyncConfig> | undefined): strin
   return url || DEFAULT_SYNC_URL
 }
 
-export function isConfigured(config: Partial<SyncConfig> | undefined): boolean {
-  return Boolean(config?.pin?.trim())
+/** Ključ, vgrajen ob gradnji (iz datoteke izven gita). V testih je prazen. */
+export const BUILTIN_SYNC_PIN: string = typeof __BUILTIN_SYNC_PIN__ === 'string' ? __BUILTIN_SYNC_PIN__ : ''
+
+/** Ročno vpisan PIN (Napredno) ima prednost, sicer vgrajen ključ. */
+export function effectivePin(config: Partial<SyncConfig> | undefined, builtin: string = BUILTIN_SYNC_PIN): string {
+  if (!config || config.localOnly) return ''
+  return config.pin?.trim() || builtin.trim()
+}
+
+export function isConfigured(config: Partial<SyncConfig> | undefined, builtin: string = BUILTIN_SYNC_PIN): boolean {
+  return Boolean(effectivePin(config, builtin))
+}
+
+/** Privzeto ime naprave, npr. »Telefon-k3f9«. */
+export function defaultDeviceName(random: () => number = Math.random): string {
+  const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789'
+  let id = ''
+  for (let i = 0; i < 4; i += 1) id += alphabet[Math.floor(random() * alphabet.length) % alphabet.length]
+  return `Telefon-${id}`
 }
 
 export function compactOps(ops: SyncOp[]): SyncOp[] {

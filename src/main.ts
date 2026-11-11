@@ -27,6 +27,26 @@ import {
 } from './storage.ts'
 import type { Article, InventoryData } from './types.ts'
 import {
+  addHistory,
+  articlesToCsv,
+  backupFileName,
+  buildBackup,
+  csvFileName,
+  filterArticles,
+  formatDelta,
+  makeSnapshot,
+  parseBackup,
+  popisToArticles,
+  totals,
+  undoQuantity,
+  type Backup,
+  type HistoryEntry,
+  type LocalExtras,
+  type QuickFilter,
+} from './features.ts'
+import { loadExtras, saveExtras } from './localState.ts'
+import { allPhotos, compressPhoto, deletePhoto, getPhoto, putPhoto } from './photos.ts'
+import {
   applyPull,
   buildSetupLink,
   enqueueOp,
@@ -42,7 +62,7 @@ import {
   type SyncConfig,
 } from './sync.ts'
 import {
-  clearSyncConfig,
+  autoSyncConfig,
   ensureSyncConfig,
   loadSyncConfig,
   saveSyncConfig,
@@ -51,7 +71,7 @@ import {
   syncPush,
 } from './syncClient.ts'
 
-const APP_VERSION = '1.3.1'
+const APP_VERSION = '1.4.0'
 
 type OcrStatus = 'idle' | 'running' | 'done' | 'error'
 
@@ -75,8 +95,13 @@ type Screen =
       frame?: string
       ocrStatus?: OcrStatus
       ocrMessage?: string
+      /** Nova slika (še ne shranjena); '' = odstrani obstoječo. */
+      photo?: string
     }
   | { kind: 'confirm-reset' }
+  | { kind: 'confirm-delete'; articleId: string }
+  | { kind: 'history'; message?: string }
+  | { kind: 'confirm-restore'; backup: Backup }
   | { kind: 'import-preview'; result: ImportResult }
   | { kind: 'sync-settings'; message?: string }
 
@@ -87,7 +112,9 @@ let banner = ''
 let scanHandle: ScanHandle | undefined
 let linkQuery = ''
 let linkQueryLocked = false
-let syncConfig: SyncConfig | undefined = loadSyncConfig()
+let syncConfig: SyncConfig | undefined = loadSyncConfig() ?? autoSyncConfig()
+let extras: LocalExtras = loadExtras()
+let quickFilter: QuickFilter = 'all'
 let syncing = false
 let syncError = ''
 let syncTimer: ReturnType<typeof setInterval> | undefined
@@ -97,15 +124,49 @@ function persist(): void {
   saveData(data)
 }
 
+function persistExtras(): void {
+  saveExtras(extras)
+}
+
+/** Zapiše spremembo količine v zgodovino (samo ta telefon) in si jo zapomni za Razveljavi. */
+function recordQty(prev: Article | undefined, next: Article, kind: HistoryEntry['kind'] = 'qty'): void {
+  const before = prev?.kolicina ?? 0
+  if (kind !== 'delete' && before === next.kolicina) return
+  const entry: HistoryEntry = {
+    at: next.updatedAt,
+    device: deviceLabel(),
+    articleId: next.id,
+    ime: next.ime || next.sifra || next.ean,
+    before,
+    after: next.kolicina,
+    kind,
+  }
+  extras = {
+    ...extras,
+    history: addHistory(extras.history, entry),
+    lastChange: kind === 'qty' ? { articleId: next.id, ime: entry.ime, before, after: next.kolicina, at: next.updatedAt } : undefined,
+  }
+  persistExtras()
+}
+
+function downloadBlob(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
 function deviceLabel(): string {
-  return (syncConfig?.deviceName || syncConfig?.deviceId || 'telefon').trim()
+  return (syncConfig?.deviceName || syncConfig?.deviceId || 'Telefon').trim()
 }
 
 function syncErrorMessage(error?: string): string {
   if (error === 'google_login') {
     return 'Google zahteva prijavo. V namestitvi skripta mora biti dostop »Kdorkoli« (tudi brez Google računa), ne samo »Kdorkoli z Google Računom«.'
   }
-  if (error === 'bad_pin') return 'PIN ni pravilen.'
+  if (error === 'bad_pin') return 'Ključ skupne zaloge ni pravilen. Pod Napredno pusti PIN prazen (vgrajen ključ) ali vpiši pravega.'
   if (error === 'timeout') return 'Povezava je potekla. Poskusi znova.'
   if (error === 'network') return 'Povezava ni uspela. Preveri internet.'
   return 'Povezava ni uspela. Preveri PIN.'
@@ -179,6 +240,18 @@ async function flushSync(): Promise<void> {
     const matched = matchLocalToRemote(data.articles, remotes)
     if (matched.remaps.length) {
       data = { ...data, articles: matched.local }
+      const lokacija = { ...extras.lokacija }
+      for (const r of matched.remaps) {
+        if (lokacija[r.from] !== undefined) {
+          lokacija[r.to] = lokacija[r.from]!
+          delete lokacija[r.from]
+        }
+        void getPhoto(r.from).then((photo) => {
+          if (photo) void putPhoto(r.to, photo).then(() => deletePhoto(r.from))
+        })
+      }
+      extras = { ...extras, lokacija }
+      persistExtras()
     }
     const latest = syncConfig
     let pending = opsAfterRemap(latest.pending, matched.remaps)
@@ -294,6 +367,29 @@ function render(): void {
     bindSyncSettings()
     return
   }
+  if (screen.kind === 'confirm-delete') {
+    const article = findById(data, screen.articleId)
+    if (!article) {
+      showHome()
+      return
+    }
+    app.innerHTML = renderHome() + renderDeleteConfirm(article)
+    bindHome()
+    bindDelete(article)
+    return
+  }
+  if (screen.kind === 'history') {
+    app.innerHTML = renderHome() + renderHistory(screen.message)
+    bindHome()
+    bindHistory()
+    return
+  }
+  if (screen.kind === 'confirm-restore') {
+    app.innerHTML = renderHome() + renderRestoreConfirm(screen.backup)
+    bindHome()
+    bindRestore(screen.backup)
+    return
+  }
   app.innerHTML = renderHome() + renderResetConfirm()
   bindHome()
   bindReset()
@@ -304,16 +400,67 @@ function liveArticles(): Article[] {
 }
 
 function visibleArticles(): Article[] {
-  return liveArticles().filter((a) => articleMatches(query, a))
+  return filterArticles(data.articles, query, quickFilter)
+}
+
+function emptyListText(): string {
+  if (liveArticles().length === 0) {
+    return firstSyncPending()
+      ? 'Nalagam skupno zalogo…'
+      : 'Ni artiklov. Naloži seznam žarnic, skeniraj škatlo ali dodaj artikel ročno.'
+  }
+  if (quickFilter === 'zero') return 'Ni artiklov z 0 kos.'
+  if (quickFilter === 'recent') return 'V zadnjih 24 urah ni sprememb.'
+  return 'Nisem našel artikla s tem iskanjem.'
+}
+
+/** Novi telefon: dokler prvič ne potegne skupne zaloge, ne ponujaj začetnega seznama (podvajanje). */
+function firstSyncPending(): boolean {
+  return isConfigured(syncConfig) && !syncConfig?.lastSyncAt && !syncError
+}
+
+function artiklov(n: number): string {
+  const m = n % 100
+  if (m === 1) return `${n} artikel`
+  if (m === 2) return `${n} artikla`
+  if (m === 3 || m === 4) return `${n} artikli`
+  return `${n} artiklov`
+}
+
+function renderTotalsLine(): string {
+  const all = totals(data.articles)
+  const shown = visibleArticles()
+  const part = totals(shown)
+  const filtered = query.trim() || quickFilter !== 'all'
+  return filtered
+    ? `Prikazano ${part.count} od ${artiklov(all.count)} · ${part.pcs} kos (skupaj ${all.pcs} kos)`
+    : `${artiklov(all.count)} · skupaj ${all.pcs} kos`
+}
+
+function renderListHtml(): string {
+  const list = visibleArticles()
+  return list.length ? list.map((a) => renderArticleCard(a)).join('') : `<p class="empty">${escapeHtml(emptyListText())}</p>`
+}
+
+function renderUndoBar(): string {
+  const c = extras.lastChange
+  if (!c) return ''
+  const article = findById(data, c.articleId)
+  if (!article || article.deleted) return ''
+  return `<div class="undo-bar">
+      <span>Zadnje: <b>${escapeHtml(c.ime)}</b> ${c.before} → ${c.after} kos</span>
+      <button type="button" class="btn" id="btn-undo">Razveljavi</button>
+    </div>`
 }
 
 
 function renderArticleCard(a: Article): string {
   const skupina = a.skupina ? `${escapeHtml(a.skupina)} · ` : ''
   return `<article class="card" data-id="${escapeHtml(a.id)}">
-            <div class="card-main" data-action="qty">
+            <div class="card-main" data-action="edit">
               <h2>${escapeHtml(a.ime || '(brez imena)')}</h2>
               <div class="meta">${skupina}${escapeHtml(a.sifra || 'brez šifre')}${a.ean ? ` · EAN ${escapeHtml(a.ean)}` : ''}</div>
+              ${extras.lokacija[a.id] ? `<div class="meta">📍 ${escapeHtml(extras.lokacija[a.id]!)}</div>` : ''}
               <div class="meta">spremenjeno ${escapeHtml(formatDateTime(a.updatedAt))}</div>
               <button type="button" class="edit-link" data-action="edit">Uredi</button>
             </div>
@@ -324,16 +471,9 @@ function renderArticleCard(a: Article): string {
 }
 
 function renderHome(): string {
-  const list = visibleArticles()
-  const cards = list.length
-    ? list
-        .map((a) => renderArticleCard(a))
-        .join('')
-    : `<p class="empty">${
-        liveArticles().length === 0
-          ? 'Ni artiklov. Naloži seznam žarnic, skeniraj škatlo ali dodaj artikel ročno.'
-          : 'Nisem našel artikla s tem iskanjem.'
-      }</p>`
+  const cards = renderListHtml()
+  const chip = (f: QuickFilter, label: string) =>
+    `<button type="button" class="chip" data-filter="${f}" aria-pressed="${quickFilter === f}">${label}</button>`
 
   const notice = banner ? `<p class="flash ok">${escapeHtml(banner)}</p>` : ''
 
@@ -341,24 +481,38 @@ function renderHome(): string {
       <img src="${import.meta.env.BASE_URL}icon-192.png" alt="" width="48" height="48" />
       <div>
         <h1>Popis žarnic</h1>
-        <p class="sub">${liveArticles().length} artiklov na tem telefonu · v${APP_VERSION}</p>
+        <p class="sub totals" id="totals">${escapeHtml(renderTotalsLine())}</p>
+        <p class="sub">v${APP_VERSION}</p>
         <p class="sync-status" id="sync-status"${currentSyncStatus() ? '' : ' hidden'}>${escapeHtml(currentSyncStatus())}</p>
       </div>
     </header>
     ${notice}
+    ${renderUndoBar()}
     <div class="stack">
       <input class="search" id="search" type="search" placeholder="Išči po imenu, šifri ali EAN" value="${escapeHtml(query)}" />
+      <div class="chips" role="group" aria-label="Hitri filter">
+        ${chip('all', 'Vse')}${chip('zero', 'Brez zaloge')}${chip('recent', 'Nedavno')}
+      </div>
       <button type="button" class="btn btn-primary" id="btn-scan">Skeniraj</button>
       <button type="button" class="btn" id="btn-new">Nov artikel</button>
       ${
-        liveArticles().length === 0
+        liveArticles().length === 0 && !firstSyncPending()
           ? `<button type="button" class="btn btn-primary" id="btn-starter">Naloži seznam žarnic (81)</button>`
           : ''
       }
       <div class="row-actions">
-        <button type="button" class="btn" id="btn-import">Uvozi Excel</button>
         <button type="button" class="btn" id="btn-export">Izvozi v Excel</button>
+        <button type="button" class="btn" id="btn-export-csv">Izvozi CSV</button>
       </div>
+      <div class="row-actions">
+        <button type="button" class="btn" id="btn-history">Zgodovina in popisi</button>
+        <button type="button" class="btn" id="btn-import">Uvozi Excel</button>
+      </div>
+      <div class="row-actions">
+        <button type="button" class="btn" id="btn-backup">Shrani kopijo</button>
+        <button type="button" class="btn" id="btn-restore">Obnovi kopijo</button>
+      </div>
+      <input id="file-restore" type="file" accept=".json,application/json" hidden />
       <input id="file-import" type="file" accept=".xlsx,.xls,.xlt,.ods,.csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.oasis.opendocument.spreadsheet,text/csv" hidden />
       <div class="row-actions">
         <button type="button" class="btn" id="btn-sync">Skupna zaloga</button>
@@ -476,21 +630,39 @@ function renderEdit(state: Extract<Screen, { kind: 'edit' }>): string {
       <form id="edit-form">
         <label for="f-ime">Ime</label>
         <input id="f-ime" name="ime" type="text" required value="${escapeHtml(imeValue)}" />
+        <label for="f-kolicina">${isNew ? 'Začetna količina' : 'Količina'}</label>
+        <div class="qty-edit">
+          <button type="button" class="btn" data-edit-delta="-1" aria-label="Manj">−</button>
+          <input id="f-kolicina" name="kolicina" type="text" inputmode="numeric" value="${article?.kolicina ?? 0}" />
+          <button type="button" class="btn" data-edit-delta="1" aria-label="Več">+</button>
+        </div>
         <label for="f-sifra">Šifra</label>
         <input id="f-sifra" name="sifra" type="text" value="${escapeHtml(sifraValue)}" />
-        <label for="f-ean">EAN</label>
+        <label for="f-ean">Koda (EAN / QR)</label>
         <input id="f-ean" name="ean" type="text" inputmode="numeric" value="${escapeHtml(eanValue)}" />
+        <label for="f-lokacija">Lokacija <span class="meta">(samo na tem telefonu)</span></label>
+        <input id="f-lokacija" name="lokacija" type="text" placeholder="npr. klet, polica 2" value="${escapeHtml((article && extras.lokacija[article.id]) || '')}" />
         <label for="f-skupina">Skupina</label>
         <input id="f-skupina" name="skupina" type="text" value="${escapeHtml(article?.skupina ?? '')}" />
         <label for="f-opomba">Opomba</label>
         <textarea id="f-opomba" name="opomba">${escapeHtml(article?.opomba ?? '')}</textarea>
-        ${isNew ? `<label for="f-kolicina">Začetna količina</label>
-        <input id="f-kolicina" name="kolicina" type="text" inputmode="numeric" value="0" />` : ''}
+        <label>Slika <span class="meta">(samo na tem telefonu)</span></label>
+        <div class="photo-box">
+          <img id="edit-photo" alt="Slika artikla" ${state.photo ? `src="${escapeHtml(state.photo)}"` : 'hidden'} />
+          <div class="row-actions">
+            <button type="button" class="btn" id="btn-photo-camera">Slikaj</button>
+            <button type="button" class="btn" id="btn-photo-gallery">Iz galerije</button>
+          </div>
+          <button type="button" class="btn btn-ghost" id="btn-photo-remove" ${state.photo ? '' : 'hidden'}>Odstrani sliko</button>
+          <input id="f-photo-camera" type="file" accept="image/*" capture="environment" hidden />
+          <input id="f-photo-gallery" type="file" accept="image/*" hidden />
+        </div>
         ${isNew && (eanValue || sifraValue || linkQuery) ? renderLinkBox(eanValue) : ''}
         <div class="stack" style="margin-top:16px">
           ${ocrBtn}
           <button type="submit" class="btn btn-primary">${isNew ? 'Dodaj nov artikel' : 'Shrani'}</button>
           <button type="button" class="btn btn-ghost" id="btn-cancel-edit">Prekliči</button>
+          ${isNew ? '' : '<button type="button" class="btn btn-danger" id="btn-delete">Izbriši</button>'}
         </div>
       </form>
     </div>
@@ -564,12 +736,39 @@ function bindHome(): void {
   document.getElementById('search')?.addEventListener('input', (e) => {
     query = (e.target as HTMLInputElement).value
     const list = document.querySelector('.list')
-    if (list) list.innerHTML = visibleArticles().length
-      ? visibleArticles()
-          .map((a) => renderArticleCard(a))
-          .join('')
-      : `<p class="empty">${liveArticles().length === 0 ? 'Ni artiklov. Naloži seznam žarnic, skeniraj škatlo ali dodaj artikel ročno.' : 'Nisem našel artikla s tem iskanjem.'}</p>`
+    if (list) list.innerHTML = renderListHtml()
+    const tot = document.getElementById('totals')
+    if (tot) tot.textContent = renderTotalsLine()
     bindCards()
+  })
+  document.querySelectorAll<HTMLButtonElement>('[data-filter]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      quickFilter = (btn.dataset.filter as QuickFilter) || 'all'
+      if (screen.kind === 'home') render()
+      else {
+        const list = document.querySelector('.list')
+        if (list) list.innerHTML = renderListHtml()
+        bindCards()
+      }
+    })
+  })
+  document.getElementById('btn-undo')?.addEventListener('click', () => undoLastChange())
+  document.getElementById('btn-export-csv')?.addEventListener('click', () => downloadCsv())
+  document.getElementById('btn-history')?.addEventListener('click', () => {
+    screen = { kind: 'history' }
+    render()
+  })
+  document.getElementById('btn-backup')?.addEventListener('click', () => {
+    void downloadBackup()
+  })
+  document.getElementById('btn-restore')?.addEventListener('click', () => {
+    document.getElementById('file-restore')?.click()
+  })
+  document.getElementById('file-restore')?.addEventListener('change', (ev) => {
+    const input = ev.target as HTMLInputElement
+    const file = input.files?.[0]
+    input.value = ''
+    if (file) void readBackupFile(file)
   })
   document.getElementById('btn-scan')?.addEventListener('click', () => {
     void openScan()
@@ -608,47 +807,54 @@ function bindHome(): void {
 
 function renderSyncSettings(message?: string): string {
   const url = effectiveSyncUrl(syncConfig)
-  const pin = syncConfig?.pin ?? ''
+  const customPin = syncConfig?.pin ?? ''
   const name = syncConfig?.deviceName ?? ''
-  const configured = isConfigured(syncConfig)
+  const localOnly = Boolean(syncConfig?.localOnly)
   const base = `${location.origin}${import.meta.env.BASE_URL}`
-  const setup = configured && syncConfig ? buildSetupLink(base, effectiveSyncUrl(syncConfig), syncConfig.pin) : ''
+  const setup = customPin && syncConfig ? buildSetupLink(base, effectiveSyncUrl(syncConfig), customPin) : ''
   const flash = message
     ? `<p class="flash${syncError ? '' : ' ok'}">${escapeHtml(message)}</p>`
     : ''
+  const state = localOnly
+    ? 'Skupna zaloga je izklopljena. Seznam je samo na tem telefonu.'
+    : `Skupna zaloga je vklopljena samodejno. ${escapeHtml(currentSyncStatus())}`
   return `<div class="overlay" id="sync-overlay">
     <div class="sheet">
       <h2>Skupna zaloga</h2>
-      <p class="hint">Vpiši PIN in ime tega telefona. Če PIN ni vpisán, ostane seznam samo na tem telefonu.</p>
+      <p class="hint">${state}</p>
       ${flash}
       <form id="sync-form" class="stack">
-        <label class="field">PIN
-          <input class="search" id="sync-pin" name="pin" type="password" inputmode="numeric" autocomplete="off" value="${escapeHtml(pin)}" />
+        <label class="field">Ime tega telefona (neobvezno)
+          <input class="search" id="sync-name" name="deviceName" autocomplete="off" value="${escapeHtml(name)}" placeholder="npr. Telefon Mojca" />
         </label>
-        <label class="field">Ime tega telefona
-          <input class="search" id="sync-name" name="deviceName" autocomplete="off" value="${escapeHtml(name)}" placeholder="npr. Hebo" />
-        </label>
-        <button type="submit" class="btn btn-primary">Shrani in poveži</button>
-        <button type="button" class="btn" id="btn-sync-test">Preizkusi povezavo</button>
-        ${configured ? '<button type="button" class="btn btn-danger" id="btn-sync-off">Odklopi (ostane lokalno)</button>' : ''}
+        <button type="submit" class="btn btn-primary">Shrani</button>
+        ${
+          localOnly
+            ? '<button type="button" class="btn" id="btn-sync-on">Vklopi skupno zalogo</button>'
+            : '<button type="button" class="btn" id="btn-sync-test">Preizkusi povezavo</button>\n        <button type="button" class="btn btn-danger" id="btn-sync-off">Samo na tem telefonu</button>'
+        }
         <button type="button" class="btn btn-ghost" id="btn-sync-close">Zapri</button>
         <details class="advanced" id="sync-advanced">
           <summary>Napredno</summary>
+          <p class="hint">Pusti prazno za vgrajen ključ.</p>
+          <label class="field">PIN (neobvezno)
+            <input class="search" id="sync-pin" name="pin" type="password" inputmode="numeric" autocomplete="off" value="${escapeHtml(customPin)}" />
+          </label>
           <label class="field">Naslov spletne aplikacije
             <input class="search" id="sync-url" name="url" type="url" inputmode="url" autocomplete="off" value="${escapeHtml(url)}" placeholder="${escapeHtml(DEFAULT_SYNC_URL)}" />
           </label>
           <label class="field">Ali prilepi povezavo za nastavitev
             <input class="search" id="sync-link" type="text" autocomplete="off" placeholder="#setup?url=…&amp;pin=…" />
           </label>
+          ${
+            setup
+              ? `<p class="hint">Povezava za drugi telefon (vsebuje PIN):</p>
+          <textarea class="search setup-link" id="sync-setup-link" readonly rows="3">${escapeHtml(setup)}</textarea>
+          <button type="button" class="btn" id="btn-copy-setup">Kopiraj povezavo</button>`
+              : ''
+          }
         </details>
       </form>
-      ${
-        setup
-          ? `<p class="hint">Povezava za drugi telefon (vsebuje PIN — hrani jo pri sebi):</p>
-        <textarea class="search setup-link" id="sync-setup-link" readonly rows="3">${escapeHtml(setup)}</textarea>
-        <button type="button" class="btn" id="btn-copy-setup">Kopiraj povezavo</button>`
-          : ''
-      }
     </div>
   </div>`
 }
@@ -665,35 +871,40 @@ function bindSyncSettings(): void {
     const deviceName = (document.getElementById('sync-name') as HTMLInputElement | null)?.value.trim() || ''
     return { url, pin, deviceName }
   }
-  document.getElementById('btn-sync-close')?.addEventListener('click', () => showHome())
-  document.getElementById('sync-form')?.addEventListener('submit', (ev) => {
-    ev.preventDefault()
+  const connect = (localOnly: boolean, okMessage: string) => {
     const { url, pin, deviceName } = readForm()
-    if (!pin) {
-      screen = { kind: 'sync-settings', message: 'Vpiši PIN, ali prilepi povezavo za nastavitev.' }
+    syncConfig = ensureSyncConfig({ url, pin, deviceName, localOnly })
+    syncError = ''
+    if (localOnly || !isConfigured(syncConfig)) {
+      screen = {
+        kind: 'sync-settings',
+        message: localOnly ? okMessage : 'Ključ ni vgrajen. Pod Napredno vpiši PIN.',
+      }
       render()
       return
     }
-    syncConfig = ensureSyncConfig({ url, pin, deviceName })
-    syncError = ''
     screen = { kind: 'sync-settings', message: 'Shranjeno. Povezujem…' }
     render()
     void flushSync().then(() => {
       screen = {
         kind: 'sync-settings',
-        message: syncError ? syncErrorMessage(syncError) : 'Povezano. Spremembe se usklajujejo z listom.',
+        message: syncError ? syncErrorMessage(syncError) : okMessage,
       }
       render()
     })
+  }
+  document.getElementById('btn-sync-close')?.addEventListener('click', () => showHome())
+  document.getElementById('sync-form')?.addEventListener('submit', (ev) => {
+    ev.preventDefault()
+    connect(Boolean(syncConfig?.localOnly), 'Shranjeno.')
+  })
+  document.getElementById('btn-sync-on')?.addEventListener('click', () => connect(false, 'Povezano. Spremembe se usklajujejo z listom.'))
+  document.getElementById('btn-sync-off')?.addEventListener('click', () => {
+    connect(true, 'Skupna zaloga je izklopljena. Seznam ostane na tem telefonu.')
   })
   document.getElementById('btn-sync-test')?.addEventListener('click', () => {
     const { url, pin, deviceName } = readForm()
-    if (!pin) {
-      screen = { kind: 'sync-settings', message: 'Vpiši PIN za preizkus.' }
-      render()
-      return
-    }
-    const trial = ensureSyncConfig({ url, pin, deviceName })
+    const trial = { ...ensureSyncConfigPreview(url, pin, deviceName) }
     void syncPing(trial)
       .then((res) => {
         screen = {
@@ -710,12 +921,6 @@ function bindSyncSettings(): void {
         render()
       })
   })
-  document.getElementById('btn-sync-off')?.addEventListener('click', () => {
-    clearSyncConfig()
-    syncConfig = undefined
-    syncError = ''
-    showHome('Skupna zaloga je odklopljena. Seznam ostane na tem telefonu.')
-  })
   document.getElementById('btn-copy-setup')?.addEventListener('click', () => {
     const text = (document.getElementById('sync-setup-link') as HTMLTextAreaElement | null)?.value ?? ''
     if (!text) return
@@ -730,6 +935,17 @@ function bindSyncSettings(): void {
       },
     )
   })
+}
+
+/** Preizkus brez shranjevanja (ne prepiše nastavitev). */
+function ensureSyncConfigPreview(url: string, pin: string, deviceName: string): SyncConfig {
+  return {
+    url,
+    pin,
+    deviceId: syncConfig?.deviceId || 'preizkus',
+    deviceName: deviceName || syncConfig?.deviceName || '',
+    pending: [],
+  }
 }
 
 function bindCards(): void {
@@ -884,6 +1100,7 @@ function bindQuantity(): void {
     }
     data = upsertArticle(data, next)
     persist()
+    recordQty(article, next)
     queueMutation(article, next)
     showHome(`Shranjeno: ${next.ime || next.sifra || next.ean} = ${next.kolicina} kos`)
   })
@@ -979,8 +1196,65 @@ async function runTextOcr(): Promise<void> {
   }
 }
 
+function setEditPhoto(photo: string): void {
+  if (screen.kind !== 'edit') return
+  screen = { ...screen, photo }
+  const img = document.getElementById('edit-photo') as HTMLImageElement | null
+  const remove = document.getElementById('btn-photo-remove')
+  if (img) {
+    if (photo) img.src = photo
+    else img.removeAttribute('src')
+    img.hidden = !photo
+  }
+  if (remove) remove.hidden = !photo
+}
+
 function bindEdit(): void {
   document.getElementById('btn-cancel-edit')?.addEventListener('click', () => showHome())
+  document.querySelectorAll<HTMLButtonElement>('[data-edit-delta]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const input = document.getElementById('f-kolicina') as HTMLInputElement | null
+      if (!input) return
+      const current = parseCount(input.value) ?? 0
+      input.value = String(Math.max(0, current + Number(btn.dataset.editDelta)))
+    })
+  })
+  const pick = (inputId: string) => {
+    const input = document.getElementById(inputId) as HTMLInputElement | null
+    input?.addEventListener('change', () => {
+      const file = input.files?.[0]
+      input.value = ''
+      if (!file) return
+      void compressPhoto(file).then(
+        (photo) => setEditPhoto(photo),
+        () => {
+          const note = document.getElementById('ocr-note')
+          if (note) note.textContent = 'Slike nisem mogel prebrati.'
+        },
+      )
+    })
+  }
+  pick('f-photo-camera')
+  pick('f-photo-gallery')
+  document.getElementById('btn-photo-camera')?.addEventListener('click', () => document.getElementById('f-photo-camera')?.click())
+  document.getElementById('btn-photo-gallery')?.addEventListener('click', () => document.getElementById('f-photo-gallery')?.click())
+  document.getElementById('btn-photo-remove')?.addEventListener('click', () => setEditPhoto(''))
+  if (screen.kind === 'edit' && screen.article && screen.photo === undefined) {
+    const id = screen.article.id
+    void getPhoto(id).then((photo) => {
+      if (photo && screen.kind === 'edit' && screen.article?.id === id && screen.photo === undefined) {
+        setEditPhoto(photo)
+        if (screen.kind === 'edit') screen = { ...screen, photo: undefined }
+        const img = document.getElementById('edit-photo') as HTMLImageElement | null
+        if (img) img.dataset.stored = '1'
+      }
+    })
+  }
+  document.getElementById('btn-delete')?.addEventListener('click', () => {
+    if (screen.kind !== 'edit' || !screen.article) return
+    screen = { kind: 'confirm-delete', articleId: screen.article.id }
+    render()
+  })
   document.getElementById('btn-ocr')?.addEventListener('click', () => {
     void runOcr()
   })
@@ -1003,10 +1277,12 @@ function bindEdit(): void {
     const skupina = String(fd.get('skupina') ?? '').trim() || inferGroupFromName(ime)
     if (!ime && !sifra && !ean) return
     if (screen.kind !== 'edit') return
-    const existing = screen.article
+    const existing = screen.article ? (findById(data, screen.article.id) ?? screen.article) : undefined
+    const photo = screen.photo
+    const lokacija = String(fd.get('lokacija') ?? '').trim()
     const startQty = parseCount(String(fd.get('kolicina') ?? '0')) ?? 0
     const article: Article = existing
-      ? { ...existing, ime, sifra, ean, opomba, skupina, updatedAt: nowIso(), updatedBy: deviceLabel() }
+      ? { ...existing, ime, sifra, ean, opomba, skupina, kolicina: Math.max(0, startQty), updatedAt: nowIso(), updatedBy: deviceLabel() }
       : {
           id: uid(),
           ime,
@@ -1020,6 +1296,14 @@ function bindEdit(): void {
         }
     data = upsertArticle(data, article)
     persist()
+    const lok = { ...extras.lokacija }
+    if (lokacija) lok[article.id] = lokacija
+    else delete lok[article.id]
+    extras = { ...extras, lokacija: lok }
+    persistExtras()
+    recordQty(existing, article)
+    if (photo === '') void deletePhoto(article.id)
+    else if (photo) void putPhoto(article.id, photo)
     queueMutation(existing, article)
     if (existing) {
       showHome('Artikel je posodobljen.')
@@ -1050,6 +1334,194 @@ function bindReset(): void {
       void flushSync()
     }
     showHome('Količine so ponastavljene. Artikli so ostali.')
+  })
+}
+
+function renderDeleteConfirm(article: Article): string {
+  return `<div class="overlay">
+    <div class="sheet">
+      <h2>Izbrišem artikel?</h2>
+      <p><b>${escapeHtml(article.ime || article.sifra || article.ean || '(brez imena)')}</b> · ${article.kolicina} kos</p>
+      <p class="hint">Artikel izgine s seznama na vseh telefonih. V skupnem listu ostane vrstica, označena kot izbrisana.</p>
+      <div class="stack" style="margin-top:16px">
+        <button type="button" class="btn btn-danger" id="btn-confirm-delete">Da, izbriši</button>
+        <button type="button" class="btn btn-ghost" id="btn-cancel-delete">Prekliči</button>
+      </div>
+    </div>
+  </div>`
+}
+
+function bindDelete(article: Article): void {
+  document.getElementById('btn-cancel-delete')?.addEventListener('click', () => {
+    screen = { kind: 'edit', article }
+    render()
+  })
+  document.getElementById('btn-confirm-delete')?.addEventListener('click', () => {
+    const next: Article = { ...article, deleted: true, updatedAt: nowIso(), updatedBy: deviceLabel() }
+    data = upsertArticle(data, next)
+    persist()
+    recordQty(article, next, 'delete')
+    const lok = { ...extras.lokacija }
+    delete lok[article.id]
+    extras = { ...extras, lokacija: lok }
+    persistExtras()
+    void deletePhoto(article.id)
+    queueMutation(article, next)
+    showHome(`Izbrisano: ${article.ime || article.sifra || article.ean}`)
+  })
+}
+
+function undoLastChange(): void {
+  const change = extras.lastChange
+  if (!change) return
+  const article = findById(data, change.articleId)
+  if (!article || article.deleted) {
+    extras = { ...extras, lastChange: undefined }
+    persistExtras()
+    showHome('Tega artikla ni več.')
+    return
+  }
+  const next: Article = {
+    ...article,
+    kolicina: undoQuantity(article.kolicina, change),
+    updatedAt: nowIso(),
+    updatedBy: deviceLabel(),
+  }
+  data = upsertArticle(data, next)
+  persist()
+  recordQty(article, next, 'undo')
+  queueMutation(article, next)
+  showHome(`Razveljavljeno: ${next.ime || next.sifra || next.ean} = ${next.kolicina} kos`)
+}
+
+function historyKindText(entry: HistoryEntry): string {
+  if (entry.kind === 'delete') return 'izbrisano'
+  if (entry.kind === 'undo') return `razveljavi ${formatDelta(entry)}`
+  return formatDelta(entry)
+}
+
+function renderHistory(message?: string): string {
+  const rows = extras.history.slice(0, 150)
+  const log = rows.length
+    ? rows
+        .map(
+          (h) => `<li><span class="h-delta${h.after - h.before < 0 ? ' neg' : ''}">${escapeHtml(historyKindText(h))}</span>
+            <span><b>${escapeHtml(h.ime || '(brez imena)')}</b> ${h.before} → ${h.after} kos<br /><span class="meta">${escapeHtml(formatDateTime(h.at))} · ${escapeHtml(h.device)}</span></span></li>`,
+        )
+        .join('')
+    : '<li class="meta">Še ni sprememb na tem telefonu.</li>'
+  const popisi = extras.popisi.length
+    ? extras.popisi
+        .map(
+          (p) => `<div class="popis-row">
+            <div><b>${escapeHtml(formatDateTime(p.at))}</b><br /><span class="meta">${p.count} artiklov · ${p.pcs} kos · ${escapeHtml(p.device)}</span></div>
+            <div class="row-actions">
+              <button type="button" class="btn" data-popis-xlsx="${escapeHtml(p.id)}">Excel</button>
+              <button type="button" class="btn" data-popis-csv="${escapeHtml(p.id)}">CSV</button>
+            </div>
+          </div>`,
+        )
+        .join('')
+    : '<p class="meta">Še ni zaključenih popisov.</p>'
+  const all = totals(data.articles)
+  return `<div class="overlay" id="history-overlay">
+    <div class="sheet">
+      <h2>Zgodovina in popisi</h2>
+      ${message ? `<p class="flash ok">${escapeHtml(message)}</p>` : ''}
+      <p class="hint">Zdaj: ${all.count} artiklov · ${all.pcs} kos.</p>
+      <button type="button" class="btn btn-primary" id="btn-finish-popis">Zaključi popis</button>
+      <h3>Pretekli popisi</h3>
+      <div class="popis-list">${popisi}</div>
+      <h3>Spremembe na tem telefonu</h3>
+      <ul class="history-list">${log}</ul>
+      <div class="stack" style="margin-top:12px">
+        <button type="button" class="btn btn-ghost" id="btn-history-close">Zapri</button>
+      </div>
+    </div>
+  </div>`
+}
+
+function bindHistory(): void {
+  document.getElementById('btn-history-close')?.addEventListener('click', () => showHome())
+  document.getElementById('btn-finish-popis')?.addEventListener('click', () => {
+    const snap = makeSnapshot(data.articles, nowIso(), deviceLabel())
+    extras = { ...extras, popisi: [snap, ...extras.popisi] }
+    persistExtras()
+    screen = { kind: 'history', message: `Popis shranjen: ${snap.count} artiklov, ${snap.pcs} kos.` }
+    render()
+  })
+  document.querySelectorAll<HTMLButtonElement>('[data-popis-xlsx]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const p = extras.popisi.find((x) => x.id === btn.dataset.popisXlsx)
+      if (p) void downloadXlsx(popisToArticles(p), `popis-zarnic-${p.at.slice(0, 10)}-zakljucen.xlsx`)
+    })
+  })
+  document.querySelectorAll<HTMLButtonElement>('[data-popis-csv]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const p = extras.popisi.find((x) => x.id === btn.dataset.popisCsv)
+      if (!p) return
+      downloadBlob(new Blob([articlesToCsv(popisToArticles(p))], { type: 'text/csv;charset=utf-8' }), `popis-zarnic-${p.at.slice(0, 10)}-zakljucen.csv`)
+    })
+  })
+}
+
+function downloadCsv(): void {
+  const name = csvFileName()
+  downloadBlob(new Blob([articlesToCsv(liveArticles(), extras.lokacija)], { type: 'text/csv;charset=utf-8' }), name)
+  showHome(`Datoteka ${name} je pripravljena.`)
+}
+
+async function downloadXlsx(articles: Article[], name: string): Promise<void> {
+  const { buildWorkbook, workbookToArrayBuffer } = await import('./export.ts')
+  const buffer = workbookToArrayBuffer(buildWorkbook(articles))
+  downloadBlob(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), name)
+}
+
+async function downloadBackup(): Promise<void> {
+  const photos = await allPhotos()
+  const backup = buildBackup(data, extras, nowIso(), photos)
+  const name = backupFileName()
+  downloadBlob(new Blob([JSON.stringify(backup)], { type: 'application/json' }), name)
+  showHome(`Kopija ${name} je shranjena v Prenose.`)
+}
+
+async function readBackupFile(file: File): Promise<void> {
+  const backup = parseBackup(await file.text())
+  if (!backup) {
+    showHome('To ni kopija Popisa žarnic.')
+    return
+  }
+  screen = { kind: 'confirm-restore', backup }
+  render()
+}
+
+function renderRestoreConfirm(backup: Backup): string {
+  const t = totals(backup.data.articles)
+  return `<div class="overlay">
+    <div class="sheet">
+      <h2>Obnovim kopijo?</h2>
+      <p>Kopija ${escapeHtml(backup.createdAt ? formatDateTime(backup.createdAt) : '')}: <b>${t.count}</b> artiklov, <b>${t.pcs}</b> kos.</p>
+      <p class="hint">Seznam na tem telefonu se zamenja s kopijo.${isConfigured(syncConfig) ? ' Razlike se pošljejo tudi v skupno zalogo.' : ''}</p>
+      <div class="stack" style="margin-top:16px">
+        <button type="button" class="btn btn-danger" id="btn-confirm-restore">Da, obnovi</button>
+        <button type="button" class="btn btn-ghost" id="btn-cancel-restore">Prekliči</button>
+      </div>
+    </div>
+  </div>`
+}
+
+function bindRestore(backup: Backup): void {
+  document.getElementById('btn-cancel-restore')?.addEventListener('click', () => showHome())
+  document.getElementById('btn-confirm-restore')?.addEventListener('click', () => {
+    const now = nowIso()
+    // novejši čas, da obnovljena polja zmagajo v skupni zalogi
+    data = { ...backup.data, articles: backup.data.articles.map((a) => ({ ...a, updatedAt: now, updatedBy: deviceLabel() })) }
+    persist()
+    extras = { ...backup.extras, history: extras.history.length ? [...extras.history] : backup.extras.history }
+    persistExtras()
+    for (const [id, photo] of Object.entries(backup.photos ?? {})) void putPhoto(id, photo)
+    void flushSync()
+    showHome(`Kopija obnovljena: ${backup.data.articles.filter((a) => !a.deleted).length} artiklov.`)
   })
 }
 

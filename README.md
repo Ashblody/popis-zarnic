@@ -15,11 +15,12 @@ Preprosta aplikacija za telefon, s katero Hebo in žena popisujeta zalogo žarni
 7. Na praznem telefonu pritisni **Naloži seznam žarnic (81)** za inventuro iz 9. 11. 2026 (2643 kos). Isti seznam lahko uvoziš tudi z **Uvozi Excel** (xlsx, xls, xlt, ods ali csv). Če se isto ime pojavi dvakrat, aplikacija obeh ne združi.
 8. Če skeniraš kodo artikla, ki ga že imaš brez EAN, izberi **Poveži z obstoječim artiklom**.
 9. Na koncu pritisni **Izvozi v Excel**. Datoteka ima list **Popis** (4 stolpci ime/količina, kot doslej) in list **Seznam** s šifro in EAN.
-10. Za skupno zalogo na obeh telefonih odpri **Skupna zaloga**, vpiši PIN in ime telefona (naslov spletne aplikacije je že vgrajen; spremeniš ga pod **Napredno**). Stanje se uskladi ob odprtju in približno vsakih 30 sekund; količine se prištevajo, da lahko oba štejeta hkrati. Če PIN ni vpisán, ostane seznam samo na tem telefonu. Ko ni interneta, vidiš **Brez povezave** — spremembe se pošljejo, ko je spet povezava.
+10. Skupna zaloga se poveže sama, brez PIN-a in brez prijave. Ime telefona je privzeto (npr. »Telefon-k3f9«); spremeniš ga v **Skupna zaloga**. PIN in naslov sta samo pod **Napredno** (neobvezno). Stanje se uskladi ob odprtju in približno vsakih 30 sekund; količine se prištevajo, da lahko oba štejeta hkrati. **Samo na tem telefonu** izklopi skupno zalogo. Ko ni interneta, vidiš **Brez povezave** — spremembe se pošljejo, ko je spet povezava.
+11. Tap na artikel odpre urejanje (količina +/−, lokacija, opomba, slika, Izbriši). Lokacija in slika sta samo na tem telefonu. **Razveljavi** vrne zadnjo spremembo količine. **Zgodovina in popisi** pokaže spremembe s tega telefona; **Zaključi popis** shrani posnetek z vsotami za kasnejši izvoz. **Shrani kopijo / Obnovi kopijo** = JSON datoteka.
 
 **Nov popis** vse količine postavi na 0, artikli (imena, šifre, kode) pa ostanejo.
 
-Namestitev skupne zaloge (Apps Script) je opisana v `apps-script/README.md`. PIN shrani samo v Script Properties, ne v to repozitorij.
+Namestitev skupne zaloge (Apps Script) je opisana v `apps-script/README.md`. PIN shrani samo v Script Properties, ne v to repozitorij. Ob gradnji se vgrajen ključ prebere iz `POPIS_SYNC_PIN` ali iz datoteke izven gita (`POPIS_SYNC_PIN_FILE`, privzeto `/workspace/popis/SKUPNA-ZALOGA-PIN.txt`); v repozitoriju ga ni, v javnem bundlu pa je.
 
 ## Razvoj
 

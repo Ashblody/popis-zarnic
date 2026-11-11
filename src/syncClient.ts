@@ -2,6 +2,8 @@ import { uid } from './storage.ts'
 import {
   DEFAULT_SYNC_URL,
   SYNC_SETTINGS_KEY,
+  defaultDeviceName,
+  effectivePin,
   effectiveSyncUrl,
   isConfigured,
   type RemoteArticle,
@@ -26,6 +28,7 @@ export function loadSyncConfig(): SyncConfig | undefined {
       deviceName: typeof parsed.deviceName === 'string' ? parsed.deviceName : '',
       lastSyncAt: typeof parsed.lastSyncAt === 'string' ? parsed.lastSyncAt : undefined,
       pending: Array.isArray(parsed.pending) ? (parsed.pending as SyncOp[]) : [],
+      localOnly: parsed.localOnly === true ? true : undefined,
     }
     return config
   } catch {
@@ -41,19 +44,43 @@ export function clearSyncConfig(): void {
   localStorage.removeItem(SYNC_SETTINGS_KEY)
 }
 
-export function ensureSyncConfig(partial: { url?: string; pin: string; deviceName?: string }): SyncConfig {
+export function ensureSyncConfig(partial: { url?: string; pin: string; deviceName?: string; localOnly?: boolean }): SyncConfig {
   const prev = loadSyncConfig()
   const url = (partial.url ?? prev?.url ?? DEFAULT_SYNC_URL).trim() || DEFAULT_SYNC_URL
   const config: SyncConfig = {
     url,
     pin: partial.pin.trim(),
     deviceId: prev?.deviceId || uid('dev'),
-    deviceName: (partial.deviceName ?? prev?.deviceName ?? '').trim(),
+    deviceName: (partial.deviceName ?? prev?.deviceName ?? '').trim() || prev?.deviceName || defaultDeviceName(),
     lastSyncAt: prev?.lastSyncAt,
     pending: prev?.pending ?? [],
+    localOnly: partial.localOnly ? true : undefined,
   }
   saveSyncConfig(config)
   return config
+}
+
+/**
+ * Brez prijave: ob odprtju vedno obstaja nastavitev. Obstoječi PIN in ime ostaneta;
+ * novi telefon dobi privzeto ime in vgrajen ključ.
+ */
+export function autoSyncConfig(): SyncConfig {
+  const prev = loadSyncConfig()
+  if (prev) {
+    if (prev.deviceName.trim()) return prev
+    const named = { ...prev, deviceName: defaultDeviceName() }
+    saveSyncConfig(named)
+    return named
+  }
+  const fresh: SyncConfig = {
+    url: DEFAULT_SYNC_URL,
+    pin: '',
+    deviceId: uid('dev'),
+    deviceName: defaultDeviceName(),
+    pending: [],
+  }
+  saveSyncConfig(fresh)
+  return fresh
 }
 
 type SyncResponse = { ok: boolean; error?: string; pong?: boolean; articles?: RemoteArticle[] }
@@ -134,7 +161,7 @@ const CHUNK = 12
 function payloadOf(config: SyncConfig, action: string, ops?: SyncOp[]): Record<string, unknown> {
   const body: Record<string, unknown> = {
     action,
-    pin: config.pin,
+    pin: effectivePin(config),
     device: config.deviceName || config.deviceId,
   }
   if (ops) body.ops = ops
@@ -153,7 +180,7 @@ async function syncCall(config: SyncConfig, action: string, ops?: SyncOp[]): Pro
     try {
       const params: Record<string, string> = {
         action,
-        pin: config.pin,
+        pin: effectivePin(config),
         device: config.deviceName || config.deviceId,
       }
       if (ops) params.ops = JSON.stringify(ops)
